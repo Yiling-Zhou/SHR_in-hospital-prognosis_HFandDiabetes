@@ -1,0 +1,2222 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+# load cran----
+```{r}
+library(pacman)
+p_load(readxl,plyr,writexl,dplyr,tidyr,ggplot2,stringr,lubridate,purrr,tidyverse,rms,interactions,splines,MESS,mice,ggsci,data.table,survminer,ebal,emmeans,hms,ebal,mgcv,bootstrap,WeightIt,cobalt,backports, broom.helpers,scales,survival,forestplot,lme4,tableone, broom.mixed)
+```
+# import model data----
+define outcomes and names each outcome
+```{r}
+files <- list.files(path = "/Users/yilingzhou/~Reaearch/Stress hyperglycemia in diabetes and HF/SHR/Data analysis/Step 3 link study population with outcome/Output", pattern="*.csv", full.names=TRUE, recursive=FALSE)
+data_list <- lapply(files,fread,header=TRUE,sep=",")
+
+outcomes <- c("Composite", "AKI_stage23", 
+              "Restricted_antibiotics",
+              "death", "CPR",  
+              "AHF", "Cardiogenic_shock", 
+              "AKI", "Infect")
+
+outcome_name <-  c("Composite of cardiac events", "Major AKI", 
+                   "Major systemic infection",
+                   "Death during hospitalization", "Requiring cardiopulmonary resuscitation", 
+                   "New episode of AHF after admission", "Cardiogenic shock",
+                   "AKI at any stage",  "Initiating any antibiotics")
+
+survival_times <- c("Composite_survival_time","aki_stage23_survival_time",
+                    "restricted_antibiotics_survival_time",
+                    "death_survival_time","cpr_survival_time",
+                    "ahf_survival_time","cs_survival_time",
+                    "aki_survival_time", "infect_survival_time")
+```
+# change follow-up----
+```{r}
+#follow up time is t days
+t <- 30
+
+data_list_change <- list()
+for (i in 1:length(outcomes)){
+  datatemp <- data_list[[i]] %>% as.data.frame()
+  outcome <- outcomes[i]
+  survival <- survival_times[i]
+  
+  datatemp[,outcome] <- datatemp[,outcome] %>% as.numeric()
+  datatemp_event <- datatemp %>% 
+    subset(.[,outcome]=="1")
+  datatemp_event[,outcome] <- ifelse(datatemp_event[,survival]>t, 0, 1)
+  datatemp_event[,survival][datatemp_event[,survival]>t] <- t
+  
+  datatemp_no <- datatemp %>% 
+    subset(.[,outcome]=="0")
+  datatemp_no[,survival][datatemp_no[,survival]>t] <- t
+  
+  datatemp <- bind_rows(datatemp_event, datatemp_no)
+  
+  data_list_change[[i]] <- datatemp
+  
+  table(datatemp[,outcome]) %>% print()
+  print(outcome)
+}
+```
+# define exposure: SHR, and tidy data for models----
+```{r}
+data_list_new <- list()
+for(i in 1:length(data_list_change)){
+  datatemp <- data_list_change[[i]]
+  
+  datatemp <- datatemp %>% 
+    mutate(CBG = (HbA1c*28.7-46.7)*0.0555,
+           SHR = round(Glucose_test_value/CBG, 2),
+           increase_BG = round(Glucose_test_value-CBG, 2)
+    ) %>% 
+    dplyr::rename(Glucose = Glucose_test_value) %>% 
+    mutate(HbA1c_group = case_when(
+      HbA1c >= 7 ~ "1",
+      HbA1c < 7 ~ "0"
+    )) 
+    
+  data_list_new[[i]] <- datatemp
+}
+```
+# main analysis
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/Stress hyperglycemia in diabetes and HF/SHR/Data analysis/Step 4 logistic regression/Output/main"
+```
+## nonlinear analysis----
+### ipw assessment plot----
+covariates: Age_current+eGFR_test_value+SBP+CCI+IHD+NT_proBNP+insulin+venous_loop_diuretics+Sex_fromID+Department
+```{r}
+dir.create(paste0(pathout, "/nonlinear results"))
+path_nonlinear <- paste0(pathout, "/nonlinear results")
+
+A_list <- c("A ","B ","C ","A ","B ","C ",'D ','E ',"F ")
+balance_list <- list()
+
+for(i in 1:length(outcomes)){
+  data <- data_list_new[[i]]
+  outcome <- outcomes[i]
+  time <- survival_times[i]
+  data <- data %>% as.data.frame()
+  
+  #ipw balance assessment plot
+  ##ipw- entropy balance
+  covariate_formula <- "Age_current+ eGFR_test_value+ SBP+ CCI+ IHD+ NT_proBNP_test_value+ 
+  insulin+ venous_loop_diuretics+ Sex_fromID+ Department"
+  
+  ps.formula <- as.formula(paste0("SHR ~ ", covariate_formula))
+  w1 <- weightit(ps.formula,
+                 data = data,
+                 method = "ebal",
+                 estimand = "ATE",
+                 stabilize = TRUE)
+  
+  set.cobalt.options(binary = "std")
+
+  balance <- bal.tab(w1,un = TRUE, 
+                     thresholds = c(m = 0.1))
+
+  ##plot for assessment of covariates balance
+  balance_list[[i]] <- love.plot(w1,
+                                 stats =  c("c"), 
+                                 drop.distance = TRUE,
+                                 abs = TRUE, 
+                                 wrap = 20,
+                                 line = TRUE,
+                                 var.order = "unadjusted",
+                                 sample.names = c("Unadjusted", "Weights adjusted"),
+                                 position = "right", 
+                                 shapes = c("circle", "triangle"),
+                                 colors = c("#1c77a3ff", "#c5a387ff"),
+                                 title = paste0(A_list[i]),
+                                 themes=theme(legend.title = element_blank()))+
+    scale_y_discrete(labels =  c('Department_Others'= "Department (Cardiology/Others)",
+                                 'Sex_fromID_Male' = "Sex",
+                                 "SBP"="Systolic BP",
+                                 "Age_current"="Age",
+                                 "NT_proBNP_test_value"="NT-proBNP",
+                                 "eGFR_test_value"="eGFR",
+                                 "insulin"="Use of insulin (Y/N)",
+                                 "venous_loop_diuretics" = "Use of venous loop diuretics (Y/N)"))+
+    theme(legend.text = element_text(size = 28, color="grey20"),
+          legend.title =  element_text(size = 28, color="grey20"),
+          axis.text = element_text(size = 18, color="grey20"),
+          axis.title =  element_text(size = 18, color="grey20"),
+          plot.title= element_text(size = 30, color="grey20",face="bold",hjust=0))
+}
+
+###create one plot of covariates balance for primary outcomes---combine plots above [1st,2nd,3rd]as one plot  
+png(file.path(path_nonlinear, "balance_nonlinear_primary outcomes.png"), height=300*12, width=300*22, res=300)
+ggarrange(balance_list[[1]],
+          balance_list[[2]]+ 
+            theme(axis.title.y = element_blank(),
+                  axis.text.y = element_blank()),
+          balance_list[[3]]+
+            theme(axis.title.y = element_blank(),
+                  axis.text.y =  element_blank()),
+          ncol=3, nrow=1, common.legend = TRUE, align="hv", legend="bottom")
+dev.off()
+```
+###nonlinear model in the total population----
+using functions in Code_functions_nonlinear: fun_boot_glm_nonlinear
+```{r}
+dir.create(paste0(pathout, "/nonlinear results"))
+path_nonlinear <- paste0(pathout, "/nonlinear results")
+ 
+A_list <- c("A ","B ","C ","A ","B ","C ",'D ','E ',"F ")
+#define exposure formal name
+xname <- "Stress hyperglycemia ratio"
+
+for(i in 1:length(outcomes)){
+  #define outcome
+  outcome <- outcomes[i]
+  #define parameter for fun_boot_glm_nonlinear function
+  ##original data
+  dt <- data_list_new[[i]]%>% 
+    as_tibble()
+  ##predict data
+  dt_new <- tibble(SHR = seq(0.4, 2.0, 0.01)) 
+  ##ipw formula
+  covariate_formula <- "Age_current+ eGFR_test_value+ SBP+ CCI+ IHD+ 
+  NT_proBNP_test_value+ insulin+ venous_loop_diuretics+ Sex_fromID+ Department"
+  ps_formula <- as.formula(paste0("SHR ~ ", covariate_formula))
+  ##glm formula
+  glm_formula <- as.formula(paste0(outcome, " ~ splines::ns(SHR, 4)"))
+  ##define exposure
+  exposure <- "SHR"
+  #bootstrap estimate the 95%CI and OR for each SHR
+  dt_plot <- fun_boot_glm_nonlinear(data = dt,
+                                    n_rep = 500, 
+                                    ps.formula = ps_formula, 
+                                    glm.formula = glm_formula, 
+                                    data_new  = dt_new, 
+                                    exposure = exposure)
+  
+  #truncated CI for major AKI and major infection
+  if(outcome %in% c("AKI_stage23", "Restricted_antibiotics")){
+    dt_plot <- dt_plot %>% 
+      mutate(confin.high = case_when(
+        confin.high >2 ~ 2,
+        TRUE ~ confin.high
+      ))
+  }
+  
+  #plot OR of each SHR for given outcome
+  ##nonlinear association of SHR (x-axis) with OR (y-axis)##
+  dt_plot %>% 
+    ggplot(aes(SHR, OR))+
+    geom_ribbon(aes(SHR, ymin = confin.low, ymax = confin.high), alpha = 0.3, fill = "#f5DCD7")+
+    geom_line(colour = "#ba414a", size = 1.5) +
+    theme_classic() +
+    labs(x = xname, y = "Odds ratio (95% CI)", title = paste0(A_list[i], outcome_name[i]))+
+    scale_x_continuous(breaks = seq(0.5, 1.6, 0.1), limits = c(0.5, 1.6),
+                       labels= c("≤0.5","0.6", "0.7","0.8","0.9","1.0","1.1","1.2","1.3",
+                                 "1.4","1.5","≥1.6"))+
+    geom_hline(yintercept=1, linetype=2, size=1, color="#c5a387ff")+
+    theme(plot.title= element_text(color="grey20",face="italic",hjust=0)) 
+
+  ggsave(file.path(path_nonlinear, paste0(outcome," OR.tiff")), plot = last_plot(), 
+       width = 8, height = 6, units = "in")
+} 
+```
+### nonlinear model in subgroup analyses---
+primary outcomes: cardiac events, major AKI, major systemic infection
+```{r}
+path_nonlinear <- paste0(pathout, "/nonlinear results")
+
+#primary outcomes
+A_list <- c("A ","B ","C ") 
+#define exposure formal name
+xname <- "Stress hyperglycemia ratio"
+
+for(i in 1:3){
+  #define outcome
+  outcome <- outcomes[i]
+  
+  #define parameter for fun_boot_glm_nonlinear function
+  ##original data
+  dt <- data_list_new[[i]]%>% 
+    as_tibble()
+  
+  ### subset data
+  data_NYHA_class23 <- dt %>% 
+    subset(NYHA=="0") %>% 
+    mutate(Subgroup = 'NYHA class 2 or 3') %>% 
+    mutate(Subgroup_name = "NYHA")
+  
+  data_NYHA_class4 <- dt %>% 
+    subset(NYHA=="1") %>% 
+    mutate(Subgroup = 'NYHA class 4') %>%
+    mutate(Subgroup_name = "NYHA")
+  
+  data_HbA1c_high <- dt %>% 
+    subset(HbA1c_group=="1") %>% 
+    mutate(Subgroup = 'HbA1c ≥7.0%') %>% 
+    mutate(Subgroup_name = "HbA1c at admission")
+  
+  data_HbA1c_low <- dt %>% 
+    subset(HbA1c_group=="0") %>% 
+    mutate(Subgroup = 'HbA1c <7.0%') %>% 
+    mutate(Subgroup_name = "HbA1c at admission")
+  
+  data_CKD <- dt %>% 
+    subset(eGFR_test_value <60) %>% 
+    mutate(Subgroup = 'eGFR <60 mL/min/1.73 m²') %>%
+    mutate(Subgroup_name = "eGFR at admission")
+  
+  data_noCKD <- dt %>% 
+    subset(eGFR_test_value>=60) %>% 
+    mutate(Subgroup = 'eGFR ≥60 mL/min/1.73 m²') %>%
+    mutate(Subgroup_name = "eGFR at admission")
+  
+  ### combine all sub-datasets
+  subdt_long <- bind_rows(data_NYHA_class23, data_NYHA_class4, data_HbA1c_low, data_HbA1c_high, data_CKD, data_noCKD) %>% 
+    mutate_at(vars("Subgroup_name"), ~factor(.,levels = c("NYHA", "HbA1c at admission", "eGFR at admission")))
+  
+  ##predict data
+  dt_new <- tibble(SHR = seq(0.4, 2.0, 0.01)) 
+  ##ipw formula
+  covariate_formula <- "Age_current+ eGFR_test_value+ SBP+ CCI+ IHD+ 
+  NT_proBNP_test_value+ insulin+ venous_loop_diuretics+ Sex_fromID+ Department"
+  ps_formula <- as.formula(paste0("SHR ~ ", covariate_formula))
+  ##glm formula
+  glm_formula <- as.formula(paste0(outcome, " ~ splines::ns(SHR, 4)"))
+  ##define exposure
+  exposure <- "SHR"
+
+  #bootstrap estimate the 95%CI and OR for each SHR
+  dt_plot <- subdt_long %>% 
+    nest_by(Subgroup_name, Subgroup) %>% 
+    mutate(Results = list(
+      fun_boot_glm_nonlinear(data = data,
+                             n_rep = 500, 
+                             ps.formula = ps_formula, 
+                             glm.formula = glm_formula, 
+                             data_new  = dt_new, 
+                             exposure = exposure)
+    )) %>% 
+    dplyr::select(Subgroup_name, Subgroup, Results) %>% 
+    unnest(Results) %>% 
+    ungroup() %>% 
+    ####truncated CI for too large confin.high, OR---restricted the scale of Y
+    mutate(confin.high = case_when(
+      confin.high >2 ~ 2,
+      TRUE ~ confin.high
+      )) %>% 
+    mutate(OR = case_when(
+      OR >2 ~ 2,
+      TRUE ~ OR
+      ))
+  
+  #plot OR of each SHR for given outcome in each subgroup analysis
+  ##nonlinear association of SHR (x-axis) with OR (y-axis)##
+  dt_plot %>% 
+    nest_by(Subgroup_name) %>% 
+    mutate(plots=
+             list(
+               p=ggplot(aes(SHR, OR), data = data)+
+                 geom_ribbon(aes(SHR, ymin = confin.low, ymax = confin.high, fill = Subgroup), alpha = 0.2)+
+                 geom_line(aes(color = Subgroup),size = 1.5) +
+                 theme_classic() +
+                 labs(x = xname, y = "Odds ratio (95% CI)", title = paste0(A_list[i], outcome_name[i]))+
+                 scale_x_continuous(breaks = seq(0.5, 1.6, 0.1), limits = c(0.5, 1.6),
+                                    labels= c("≤0.5","0.6", "0.7","0.8","0.9","1.0","1.1","1.2","1.3",
+                                              "1.4","1.5","≥1.6"))+
+                 scale_color_manual(values = c("#9E4C36", "#607DA3")) +
+                 scale_fill_manual(values = c("#9E4C36", "#607DA3")) +
+                 geom_hline(yintercept=1, linetype=2, size=1, color="#c5a387ff")+
+                 theme(plot.title= element_text(color="grey20",face="italic",hjust=0),
+                       legend.position = "top") 
+                         )) %>% 
+    dplyr::select(Subgroup_name, plots) ->Subgroup_plot
+    
+  ggsave(file.path(path_nonlinear, 
+                   paste0("Subgroup nonlinear", outcome, " ", Subgroup_plot$Subgroup_name[1]," .tiff")), 
+         plot = Subgroup_plot$plots[[1]],
+         width = 8, height = 6, units = "in")
+  ggsave(file.path(path_nonlinear, 
+                   paste0("Subgroup nonlinear", outcome, " ", Subgroup_plot$Subgroup_name[2]," .tiff")), 
+         plot = Subgroup_plot$plots[[2]],
+         width = 8, height = 6, units = "in")
+  ggsave(file.path(path_nonlinear, 
+                   paste0("Subgroup nonlinear", outcome, " ", Subgroup_plot$Subgroup_name[3]," .tiff")), 
+         plot = Subgroup_plot$plots[[3]],
+         width = 8, height = 6, units = "in")
+} 
+```
+## glm model of categorical exposure in the total population and subgroups: tertile analysis----
+```{r}
+ratio_levels <- c("Second tertile", "First tertile", "Third tertile")
+
+dir.create(paste0(pathout, "/tertile results"))
+pathout_tertile <- paste0(pathout, "/tertile results")
+# catgorical 
+results <- data.frame()
+results_interaction <- data.frame()
+
+balance_list <- list()
+
+for (i in 1:length(outcomes)){
+  data <- data_list_new[[i]]
+  outcome <- outcomes[i]
+
+  data <- data %>% 
+    as_tibble() %>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    ))
+  
+  data$ratio <- factor(data$ratio, levels = ratio_levels)
+  
+  # subset data
+  data_HbA1c_high <- data %>% 
+    subset(HbA1c_group=="1") %>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_HbA1c_low <- data %>% 
+    subset(HbA1c_group=="0")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_NYHA_class23 <- data %>% 
+    subset(NYHA=="0")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_NYHA_class4 <- data %>% 
+    subset(NYHA=="1")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_CKD <- data %>% 
+    subset(eGFR_test_value <60)%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_noCKD <- data %>% 
+    subset(eGFR_test_value >=60)%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+
+  datasets <- list(data_noCKD, data_CKD, data_HbA1c_high, data_HbA1c_low, 
+                   data_NYHA_class4,data_NYHA_class23,data)
+  datanames <- c("eGFR ≥60 mL/min/1.73 m²", "eGFR <60 mL/min/1.73 m²", 'HbA1c ≥7.0%', 'HbA1c <7.0%',
+                 "NYHA class 4","NYHA class 2 or 3",'Total')
+
+  for(j in 1:length(datasets)){
+    datatemp <- datasets[[j]]
+    datanametemp <- datanames[j]
+    resulttemp <- fun_glm_tertile(datatemp,datanametemp,outcome)
+    results <- rbind.fill(resulttemp,results)
+    print(paste(i,j,sep="---"))
+  }
+  
+  results <- results %>% 
+    as_tibble() %>% 
+    add_row(label=outcome, Outcome=outcome, .before=1) %>% 
+    as.data.frame()
+  
+  # interaction
+  covariate_formula <- "Age_current+eGFR_test_value+SBP+CCI+IHD+NT_proBNP_test_value+
+  insulin+venous_loop_diuretics+Sex_fromID+Department"
+  ps.formula <- as.formula(paste0("ratio ~ ", covariate_formula))
+  w1 <- weightit(ps.formula,
+                 data = data,
+                 method = "ebal",
+                 distribution='multinomial',
+                 estimand = "ATE",
+                 stabilize = TRUE)
+  
+  data$ipw <- w1$weights
+  
+  ##plot for assessment of covariates balance
+  balance_list[[i]] <- love.plot(w1,
+                                 stats =  c("m"), 
+                                 drop.distance = TRUE,
+                                 abs = TRUE, 
+                                 wrap = 20,
+                                 line = TRUE,
+                                 var.order = "unadjusted",
+                                 sample.names = c("Unadjusted", "Weights adjusted"),
+                                 position = "right", 
+                                 shapes = c("circle", "triangle"),
+                                 colors = c("#1c77a3ff", "#c5a387ff"),
+                                 title = paste0(A_list[i]),
+                                 themes=theme(legend.title = element_blank()))+
+    scale_y_discrete(labels =  c('Department_Others'= "Department (Cardiology/Others)",
+                                 'Sex_fromID_Male' = "Sex",
+                                 "SBP"="Systolic BP",
+                                 "Age_current"="Age",
+                                 "NT_proBNP_test_value"="NT-proBNP",
+                                 "eGFR_test_value"="eGFR",
+                                 "insulin"="Use of insulin (Y/N)",
+                                 "venous_loop_diuretics" = "Use of venous loop diuretics (Y/N)"))+
+    theme(legend.text = element_text(size = 28, color="grey20"),
+          legend.title =  element_text(size = 28, color="grey20"),
+          axis.text = element_text(size = 18, color="grey20"),
+          axis.title =  element_text(size = 18, color="grey20"),
+          plot.title= element_text(size = 30, color="grey20",face="bold",hjust=0))
+  
+  term_set <- c("CKD", "HbA1c_group", "NYHA") # CKD variable is baseline eGFR <60 mL/min/1.73 m²
+  
+  for(k in 1:length(term_set)){
+    termtemp <- term_set[[k]]
+    temp <- fun_glm_tertile_interaction(termtemp, outcome)
+    results_interaction <- rbind.fill(results_interaction,temp)
+  }
+}
+
+###create one plot of covariates balance for primary outcomes---combine plots above [1st,2nd,3rd]as one plot  
+png(file.path(pathout_tertile, "balance_tertile_primary outcomes.png"), height=300*12, width=300*22, res=300)
+ggarrange(balance_list[[1]],
+          balance_list[[2]]+ 
+            theme(axis.title.y = element_blank(),
+                  axis.text.y = element_blank()),
+          balance_list[[3]]+
+            theme(axis.title.y = element_blank(),
+                  axis.text.y =  element_blank()),
+          ncol=3, nrow=1, common.legend = TRUE, align="hv", legend="bottom")
+dev.off()
+
+#tidy results
+results$ORCI[results$ORCI=='NA (NA to NA)'] <- NA
+results$ORCI[results$ORCI=='1.00 (NA to NA)'] <- NA
+
+write_xlsx(results_interaction,file.path(pathout_tertile,"interaction_logisitc.xlsx"))
+write_xlsx(results,file.path(pathout_tertile,"logistic.xlsx"))
+```
+### forest plot of total population for priamry and secondary outcomes, separately---
+```{r}
+library(forestplot)
+result_list <- results %>% 
+  split(., f=factor(results$Outcome))
+
+# forest plot for primary outcomes
+PrimaryOutcomes <- bind_rows(result_list$Composite[2:5,], result_list$AKI_stage23[2:5,], 
+                     result_list$Restricted_antibiotics[2:5,]) %>% 
+  as_tibble() %>% 
+  mutate(label = case_when(
+    label == "Total" ~ Outcome,
+    TRUE ~ label
+  )) %>% 
+  mutate(p_value = p.value %>% 
+           as.numeric() %>% sprintf("%.2f",.)) %>% 
+  mutate(p_value = case_when(
+    p_value %in% c("0.00", "NA") ~ p.value,
+    TRUE ~ p_value
+  )) %>% 
+  add_row(label = "Outcome", ORCI = "Odds ratio (95% CI)", `n of N` = "n of N", p_value = "P value", .before= 1) %>%
+  dplyr::select("label","n of N", "estimate", "conf.low", "conf.high", "ORCI", "p_value") %>% 
+  mutate(label = case_when(
+    label == "First tertile" ~ "   First tertile of SHR",
+    label == "Second tertile" ~ "   Second tertile of SHR",
+    label == "Third tertile" ~ "   Third tertile of SHR",
+    TRUE ~ label
+  )) %>% 
+  mutate(label = case_when(
+    label == "Composite" ~ "Composite of cardiac events",
+    label == "AKI_stage23" ~ "Major AKI",
+    label == "Restricted_antibiotics" ~ "Major systemic infection",
+    TRUE ~ label
+  )) %>% 
+  mutate_at(vars("estimate", "conf.low", "conf.high"), as.numeric) 
+
+text <- c("label","n of N", "ORCI", "p_value" )
+
+tiff(file.path(pathout_tertile,"Total-OR forest primary outcome.tiff"),height = 300*8, width =300*16,res= 300)
+p <- forestplot (labeltext = as.matrix(PrimaryOutcomes[,text]),#设置用于文本展示的列,在图中展示
+                 mean=PrimaryOutcomes$estimate,
+                 lower=PrimaryOutcomes$conf.low,
+                 upper=PrimaryOutcomes$conf.high,
+                 is.summary=c(T,T,F,F,F,T,F,F,F,T,F,F,F),
+                 hrzl_lines=list("1" = gpar(lwd=2, col="#1c77a3ff"),
+                                 "2" = gpar(lty=1, col="#1c77a3ff")),
+                 graphwidth = unit(7, 'cm'),
+                 xlog=TRUE,
+                 xlab= "Estimates of relative risk",
+                 lineheight = 'auto',
+                 line.margin =unit(3, 'mm'),
+                 clip=c(0.7,3.6),
+                 xticks = c(0.7, 1.0,1.3, 1.9, 2.5, 3.5),
+                 txt_gp=fpTxtGp(label=gpar(cex=1.2),
+                                summary=gpar(cex=1.35, fontface='bold'),
+                                ticks=gpar(cex=1.2),
+                                xlab=gpar(cex = 1.4),
+                                title=gpar(cex = 1.35)),
+                 
+                 col=fpColors(box="#1c77a3ff", lines="#c5a387ff", zero = "gray50"),
+                 zero=1, cex=1,  boxsize=0.2, colgap=unit(1,"cm"),
+                 lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.2,
+                 graph.pos=4)
+print(p)
+dev.off()
+
+# forest plot for secondary outcomes
+SecondaryOutcomes <- bind_rows(result_list$death[2:5,], result_list$CPR[2:5,], 
+                     result_list$Cardiogenic_shock[2:5,], result_list$AHF[2:5,],
+                     result_list$AKI[2:5,], result_list$Infect[2:5,]) %>% 
+  as_tibble() %>% 
+  mutate(label = case_when(
+    label == "Total" ~ Outcome,
+    TRUE ~ label
+  )) %>% 
+  mutate(p_value = p.value %>% 
+           as.numeric() %>% sprintf("%.2f",.)) %>% 
+  mutate(p_value = case_when(
+    p_value %in% c("0.00", "NA") ~ p.value,
+    TRUE ~ p_value
+  )) %>% 
+  add_row(label = "Outcome", ORCI = "Odds ratio (95% CI)", `n of N` = "n of N", p_value = "P value", .before= 1) %>%
+  dplyr::select("label","n of N", "estimate", "conf.low", "conf.high", "ORCI", "p_value") %>% 
+  mutate(label = case_when(
+    label == "First tertile" ~ "   First tertile of SHR",
+    label == "Second tertile" ~ "   Second tertile of SHR",
+    label == "Third tertile" ~ "   Third tertile of SHR",
+    TRUE ~ label
+  )) %>% 
+  mutate(label = case_when(
+    label == "death" ~ "Death during hospitalization",
+    label == "CPR"  ~  "Requiring cardiopulmonary resuscitation",
+    label == "Cardiogenic_shock" ~ "Cardiogenic shock",
+    label == "AHF" ~ "New episode of AHF after admission",
+    label == "AKI" ~ "AKI at any stage",
+    label == "Infect"  ~ "Initiating any antibiotics",
+    TRUE ~ label
+  )) %>% 
+  mutate_at(vars("estimate", "conf.low", "conf.high"), as.numeric) 
+
+text <- c("label","n of N", "ORCI", "p_value" )
+
+png(file.path(pathout_tertile,"Total-OR forest secondary outcome.png"),height = 300*10, width =300*16,res= 300)
+p <- forestplot (labeltext = as.matrix(SecondaryOutcomes[,text]),#设置用于文本展示的列,在图中展示
+                 mean=SecondaryOutcomes$estimate,
+                 lower=SecondaryOutcomes$conf.low,
+                 upper=SecondaryOutcomes$conf.high,
+                 is.summary=c(T,T,F,F,F,T,F,F,F,T,F,F,F,T,F,F,F,T,F,F,F,T,F,F,F),
+                 hrzl_lines=list("1" = gpar(lwd=2, col="#1c77a3ff"),
+                                 "2" = gpar(lty=1, col="#1c77a3ff")),
+                 graphwidth = unit(7, 'cm'),
+                 xlog=TRUE,
+                 xlab= "Estimates of relative risk",
+                 lineheight = 'auto',
+                 line.margin =unit(3, 'mm'),
+                 clip=c(0.4,3.6),
+                 xticks = c(0.4, 0.7, 1.0, 1.5, 2.0, 3.0, 3.5),
+                 txt_gp=fpTxtGp(label=gpar(cex=1.2),
+                                summary=gpar(cex=1.35, fontface='bold'),
+                                ticks=gpar(cex=1.2),
+                                xlab=gpar(cex = 1.4),
+                                title=gpar(cex = 1.35)),
+                 
+                 col=fpColors(box="#1c77a3ff", lines="#c5a387ff", zero = "gray50"),
+                 zero=1, cex=1,  boxsize=0.2, colgap=unit(1,"cm"),
+                 lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.2,
+                 graph.pos=4)
+print(p)
+dev.off()
+
+```
+### forest plot for tertile results with subgroup analysis---
+```{r}
+library(forestplot)
+result_list <- results %>% 
+  split(., f=factor(results$Outcome))
+forestplot_name <-  c("new episode of AHF after admission", "AKI at any stage",  "major AKI",
+                      "cardiogenic shock", "composite of cardiac events",  
+                      "requiring cardiopulmonary resuscitation", 
+                      "death during hospitalization", "initiating any antibiotics",
+                      "major systemic infection")
+
+for (m in 1:length(result_list)){
+  result_HR <- result_list[[m]]
+  result_HR$p_value <- result_HR$p.value %>% as.numeric() %>% sprintf("%.2f",.)
+  result_HR$p_value[result_HR$p_value%in%c("0.00", "NA")] <- result_HR$p.value[result_HR$p_value%in%c("0.00", "NA")]
+                     
+  result_HR <- result_HR %>% 
+    dplyr::select("label","n of N", "estimate", "conf.low", "conf.high", "ORCI", "p_value") %>% 
+    rename("Odds ratio (95% CI)" = "ORCI",
+           "P value" = "p_value",
+           "Subgroups" = "label") %>% 
+    rbind(names(.),.)
+  
+  result_HR$Subgroups[result_HR$Subgroups=="First tertile"] <- "   First tertile of SHR"
+  result_HR$Subgroups[result_HR$Subgroups=="Second tertile"] <- "   Second tertile of SHR"
+  result_HR$Subgroups[result_HR$Subgroups=="Third tertile"] <- "   Third tertile of SHR"
+  
+  num <- c("estimate", "conf.low", "conf.high")
+  text <- c("Subgroups", "n of N", "Odds ratio (95% CI)", "P value")
+  
+  result_HR <- result_HR %>% 
+    mutate_at(vars(all_of(num)),as.numeric) 
+  result_HR$estimate[result_HR$estimate==0] <- 0.001
+  result_HR$conf.low[result_HR$conf.low==0] <- 0.001
+  result_HR$conf.high[result_HR$conf.high==0] <- 0.001
+  result_HR$`Odds ratio (95% CI)` [is.na(result_HR$estimate)&result_HR$conf.low=="0.001"] <- "Inf"
+  result_HR$estimate[result_HR$estimate>10] <- 11
+  result_HR$conf.high[result_HR$conf.high>10] <- 11
+  result_HR <- result_HR[-2,]
+  
+  result_HR_total <- result_HR[c(1:5),]
+  result_HR_sub <- result_HR[c(6:29),]
+  result_HR_sub$Subgroups <- paste0("    ", result_HR_sub$Subgroups)
+  result_HR <- bind_rows(result_HR_total, result_HR_sub)  
+  
+  result_HR <- result_HR %>% 
+    as_tibble() %>% 
+    add_row(Subgroups="eGFR at admission",  .before=22) %>% 
+    add_row(Subgroups="HbA1c at admission",  .before=14) %>% 
+    add_row(Subgroups="NYHA",  .before=6) %>% 
+    as.data.frame()
+  
+  
+  png(file.path(pathout_tertile, paste(forestplot_name[m]," OR forest.png")),
+      height = 300*12, width =300*16,res= 300)
+  
+  p <- forestplot (labeltext = as.matrix(result_HR[,text]),#设置用于文本展示的列,在图中展示
+                   mean=result_HR$estimate,
+                   lower=result_HR$conf.low,
+                   upper=result_HR$conf.high,
+                   is.summary=c(T,T,F,F,F,T,T,F,F,F,T,F,F,F,T,T,F,F,F,T,F,F,F,T,T,F,F,F,T,F,F,F),
+                   # hrzl_lines=list("2" = gpar(lwd=2, col="black"),
+                   #                 "66" = gpar(lwd=2, col="black")),
+                   graphwidth = unit(7, 'cm'),
+                   xlog=TRUE,
+                   xlab=paste0("At a higher risk of ", forestplot_name[m]),
+                   lineheight = 'auto',
+                   line.margin =unit(3, 'mm'),
+                
+                   txt_gp=fpTxtGp(label=gpar(cex=1.2),
+                                  summary=gpar(cex=1.35, fontface='bold'),
+                                  ticks=gpar(cex=1.2),
+                                  xlab=gpar(cex = 1.4),
+                                  title=gpar(cex = 1.35)),
+                   col=fpColors(box="#1c77a3ff", lines="#c5a387ff", zero = "gray50"),
+                   zero=1, cex=1,  boxsize=0.2, colgap=unit(1,"cm"),
+                   lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.2,
+                   graph.pos=4)
+  print(p)
+  dev.off()
+}
+```
+#length of stay possion---
+```{r}
+data <- data_list_new[[4]]%>% 
+  subset(Length_stay<=30)
+
+data[,time][data[,time]==0] <- 0.5
+
+data <- data %>% 
+  mutate(ratio = case_when(
+    SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+    SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+    SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+  )) %>% 
+  mutate(ratio=factor(ratio, levels = ratio_levels))
+
+# boxplot
+png(file.path(pathout_tertile, "length of stay comparision.png"),height=300*10,width=300*15,res=300)
+plot1 <- data %>% 
+  ggplot(aes(x=ratio, y=death_survival_time))+
+  geom_boxplot(aes(fill=ratio), size=1, fill="#008e90ff")+
+  theme_minimal()+
+  labs(title= "Total population", x=xname, y="Length of stay in hospital (days)")+
+  scale_y_continuous(limits=c(7,20),breaks=seq(7,20,2))+
+  theme(axis.text = element_text(size = 24, color="grey20"),
+        axis.title =  element_text(size = 24, color="grey20", face="italic"),
+        plot.title = element_text(size = 26, color="grey20", face="bold"))
+print(plot1)
+dev.off()
+```
+#tertile range for each outcome stratified by subgroups----
+```{r}
+ratio_levels <- c("First tertile", "Second tertile",  "Third tertile")
+
+# catgorical 
+tertile_table <- data.frame()
+
+for (i in 1:length(outcomes)){
+  tertile_table_sub <- data.frame()
+  data <- data_list_new[[i]]
+  outcome <- outcomes[i]
+  time <- survival_times[i]
+  data <- data %>% as.data.frame()
+  data <- data %>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    ))
+  
+  data$ratio <- factor(data$ratio, levels = ratio_levels)
+  
+  # subset data
+  data_HbA1c_high <- data %>% 
+    subset(HbA1c_group=="1") %>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_HbA1c_low <- data %>% 
+    subset(HbA1c_group=="0")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_NYHA_class23 <- data %>% 
+    subset(NYHA=="0")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_NYHA_class4 <- data %>% 
+    subset(NYHA=="1")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_CKD <- data %>% 
+    subset(eGFR_test_value <60)%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_noCKD <- data %>% 
+    subset(eGFR_test_value >=60)%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  
+  tertile_table_fun <- function(dataset, dataname){
+    
+    tertile_table_temp <- dataset %>% 
+      group_by(ratio) %>% 
+      summarise(N = n_distinct(anonymousID), low = sprintf("%.2f",min(SHR)), upp= sprintf("%.2f",max(SHR))) %>% 
+      mutate(Range_N = paste0(low, " ~ ", upp, " [", N, "]")) %>% 
+      dplyr::select("ratio", "Range_N") %>% 
+      as.data.frame() %>% 
+      mutate(Population = dataname) %>% 
+      pivot_wider(names_from = "ratio", values_from = "Range_N") %>% 
+      as.data.frame()
+
+    return(tertile_table_temp)
+  }
+  
+  datasets <- list(data, data_NYHA_class23, data_NYHA_class4, data_HbA1c_low, data_HbA1c_high,
+                   data_CKD, data_noCKD)
+  datanames <- c('Total', "NYHA class 2 or 3","NYHA class 4", 'HbA1c <7.0%', 'HbA1c ≥7.0%',
+                 "eGFR <60 mL/min/1.73 m²","eGFR ≥60 mL/min/1.73 m²")
+
+  for(j in 1:length(datasets)){
+    tertile_table_temp <-  tertile_table_fun(datasets[[j]], datanames[j])
+    tertile_table_sub <- bind_rows(tertile_table_sub, tertile_table_temp)
+    print(paste0(i,"~",j))
+  }
+  
+  tertile_table_sub$Population[2:7] <- paste0("  ",  tertile_table_sub$Population[2:7])
+  tertile_table_sub <- tertile_table_sub %>% 
+    as_tibble() %>% 
+    add_row(Population="eGFR at admission",  .before=6) %>% 
+    add_row(Population="HbA1c at admission",  .before=4) %>% 
+    add_row(Population="NYHA",  .before=2) %>% 
+    as.data.frame()
+  
+  tertile_table_sub$Population <- paste0("  ",  tertile_table_sub$Population)
+  
+  tertile_table_sub <-tertile_table_sub %>% 
+    as_tibble() %>% 
+    add_row(Population=outcome_name[i],  .before=1) %>% 
+    as.data.frame()
+  
+  tertile_table <- bind_rows(tertile_table, tertile_table_sub)
+}
+
+write_xlsx(tertile_table, file.path(pathout_tertile, "tertile_range_table.xlsx"))
+```
+# 1.sensitivity analysis - exclude hypoglycemia (glucose <3.9 mmol/L) before and within two days of admission
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/Stress hyperglycemia in diabetes and HF/SHR/Data analysis/Step 4 logistic regression/Output/exclude hypoglycemia"
+
+dt_exclude <- fread("/Users/yilingzhou/~Reaearch/Stress hyperglycemia in diabetes and HF/SHR/Data analysis/Step 1 study population selection and their baseline/Output/hypoglycemia episodes/hypoglycemia episodes around admission.csv")
+```
+## nonlinear analysis----
+### ipw assessment plot----
+covariates: Age_current+eGFR_test_value+SBP+CCI+IHD+NT_proBNP+insulin+venous_loop_diuretics+Sex_fromID+Department
+```{r}
+dir.create(paste0(pathout, "/nonlinear results"))
+path_nonlinear <- paste0(pathout, "/nonlinear results")
+
+A_list <- c("A ","B ","C ","A ","B ","C ",'D ','E ',"F ")
+balance_list <- list()
+
+for(i in 1:length(outcomes)){
+  data <- data_list_new[[i]]
+  outcome <- outcomes[i]
+  time <- survival_times[i]
+  data <- data %>% 
+    as.data.frame() %>% 
+    filter(!anonymousID %in% dt_exclude$anonymousID)
+  
+  #ipw balance assessment plot
+  ##ipw- entropy balance
+  covariate_formula <- "Age_current+ eGFR_test_value+ SBP+ CCI+ IHD+ NT_proBNP_test_value+ 
+  insulin+ venous_loop_diuretics+ Sex_fromID+ Department"
+  
+  ps.formula <- as.formula(paste0("SHR ~ ", covariate_formula))
+  w1 <- weightit(ps.formula,
+                 data = data,
+                 method = "ebal",
+                 estimand = "ATE",
+                 stabilize = TRUE)
+  
+  set.cobalt.options(binary = "std")
+
+  balance <- bal.tab(w1,un = TRUE, 
+                     thresholds = c(m = 0.1))
+
+  ##plot for assessment of covariates balance
+  balance_list[[i]] <- love.plot(w1,
+                                 stats =  c("c"), 
+                                 drop.distance = TRUE,
+                                 abs = TRUE, 
+                                 wrap = 20,
+                                 line = TRUE,
+                                 var.order = "unadjusted",
+                                 sample.names = c("Unadjusted", "Weights adjusted"),
+                                 position = "right", 
+                                 shapes = c("circle", "triangle"),
+                                 colors = c("#1c77a3ff", "#c5a387ff"),
+                                 title = paste0(A_list[i]),
+                                 themes=theme(legend.title = element_blank()))+
+    scale_y_discrete(labels =  c('Department_Others'= "Department (Cardiology/Others)",
+                                 'Sex_fromID_Male' = "Sex",
+                                 "SBP"="Systolic BP",
+                                 "Age_current"="Age",
+                                 "NT_proBNP_test_value"="NT-proBNP",
+                                 "eGFR_test_value"="eGFR",
+                                 "insulin"="Use of insulin (Y/N)",
+                                 "venous_loop_diuretics" = "Use of venous loop diuretics (Y/N)"))+
+    theme(legend.text = element_text(size = 28, color="grey20"),
+          legend.title =  element_text(size = 28, color="grey20"),
+          axis.text = element_text(size = 18, color="grey20"),
+          axis.title =  element_text(size = 18, color="grey20"),
+          plot.title= element_text(size = 30, color="grey20",face="bold",hjust=0))
+}
+
+###create one plot of covariates balance for primary outcomes---combine plots above [1st,2nd,3rd]as one plot  
+png(file.path(path_nonlinear, "balance_nonlinear_primary outcomes.png"), height=300*12, width=300*22, res=300)
+ggarrange(balance_list[[1]],
+          balance_list[[2]]+ 
+            theme(axis.title.y = element_blank(),
+                  axis.text.y = element_blank()),
+          balance_list[[3]]+
+            theme(axis.title.y = element_blank(),
+                  axis.text.y =  element_blank()),
+          ncol=3, nrow=1, common.legend = TRUE, align="hv", legend="bottom")
+dev.off()
+```
+###nonlinear model in the total population----
+using functions in Code_functions_nonlinear: fun_boot_glm_nonlinear
+```{r}
+dir.create(paste0(pathout, "/nonlinear results"))
+path_nonlinear <- paste0(pathout, "/nonlinear results")
+ 
+A_list <- c("A ","B ","C ","A ","B ","C ",'D ','E ',"F ")
+#define exposure formal name
+xname <- "Stress hyperglycemia ratio"
+
+for(i in 1:length(outcomes)){
+  #define outcome
+  outcome <- outcomes[i]
+  #define parameter for fun_boot_glm_nonlinear function
+  ##original data
+  dt <- data_list_new[[i]]%>% 
+    as_tibble() %>% 
+    filter(!anonymousID %in% dt_exclude$anonymousID)
+  ##predict data
+  dt_new <- tibble(SHR = seq(0.4, 2.0, 0.01)) 
+  ##ipw formula
+  covariate_formula <- "Age_current+ eGFR_test_value+ SBP+ CCI+ IHD+ 
+  NT_proBNP_test_value+ insulin+ venous_loop_diuretics+ Sex_fromID+ Department"
+  ps_formula <- as.formula(paste0("SHR ~ ", covariate_formula))
+  ##glm formula
+  glm_formula <- as.formula(paste0(outcome, " ~ splines::ns(SHR, 4)"))
+  ##define exposure
+  exposure <- "SHR"
+  #bootstrap estimate the 95%CI and OR for each SHR
+  dt_plot <- fun_boot_glm_nonlinear(data = dt,
+                                    n_rep = 500, 
+                                    ps.formula = ps_formula, 
+                                    glm.formula = glm_formula, 
+                                    data_new  = dt_new, 
+                                    exposure = exposure)
+  
+  #truncated CI for major AKI and major infection
+  if(outcome %in% c("AKI_stage23", "Restricted_antibiotics")){
+    dt_plot <- dt_plot %>% 
+      mutate(confin.high = case_when(
+        confin.high >2 ~ 2,
+        TRUE ~ confin.high
+      ))
+  }
+  
+  #plot OR of each SHR for given outcome
+  ##nonlinear association of SHR (x-axis) with OR (y-axis)##
+  dt_plot %>% 
+    ggplot(aes(SHR, OR))+
+    geom_ribbon(aes(SHR, ymin = confin.low, ymax = confin.high), alpha = 0.3, fill = "#f5DCD7")+
+    geom_line(colour = "#ba414a", size = 1.5) +
+    theme_classic() +
+    labs(x = xname, y = "Odds ratio (95% CI)", title = paste0(A_list[i], outcome_name[i]))+
+    scale_x_continuous(breaks = seq(0.6, 1.3, 0.1), limits = c(0.6, 1.3),
+                       labels= c("≤0.6","0.7","0.8","0.9","1.0","1.1","1.2","≥1.3"))+
+    geom_hline(yintercept=1, linetype=2, size=1, color="#c5a387ff")+
+    theme(plot.title= element_text(color="grey20",face="italic",hjust=0)) 
+
+  ggsave(file.path(path_nonlinear, paste0(outcome," OR.tiff")), plot = last_plot(), 
+       width = 8, height = 6, units = "in")
+} 
+```
+## glm model of categorical exposure in the total population and subgroups: tertile analysis----
+```{r}
+ratio_levels <- c("Second tertile", "First tertile", "Third tertile")
+
+dir.create(paste0(pathout, "/tertile results"))
+pathout_tertile <- paste0(pathout, "/tertile results")
+# catgorical 
+results <- data.frame()
+results_interaction <- data.frame()
+
+balance_list <- list()
+
+for (i in 1:length(outcomes)){
+  data <- data_list_new[[i]] %>% 
+    as_tibble() %>% 
+    filter(!anonymousID %in% dt_exclude$anonymousID)
+  
+  outcome <- outcomes[i]
+
+  data <- data %>% 
+    as_tibble() %>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    ))
+  
+  data$ratio <- factor(data$ratio, levels = ratio_levels)
+  
+  # subset data
+  data_HbA1c_high <- data %>% 
+    subset(HbA1c_group=="1") %>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_HbA1c_low <- data %>% 
+    subset(HbA1c_group=="0")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_NYHA_class23 <- data %>% 
+    subset(NYHA=="0")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_NYHA_class4 <- data %>% 
+    subset(NYHA=="1")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_CKD <- data %>% 
+    subset(eGFR_test_value <60)%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_noCKD <- data %>% 
+    subset(eGFR_test_value >=60)%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+
+  datasets <- list(data_noCKD, data_CKD, data_HbA1c_high, data_HbA1c_low, 
+                   data_NYHA_class4,data_NYHA_class23,data)
+  datanames <- c("eGFR ≥60 mL/min/1.73 m²", "eGFR <60 mL/min/1.73 m²", 'HbA1c ≥7.0%', 'HbA1c <7.0%',
+                 "NYHA class 4","NYHA class 2 or 3",'Total')
+
+  for(j in 1:length(datasets)){
+    datatemp <- datasets[[j]]
+    datanametemp <- datanames[j]
+    resulttemp <- fun_glm_tertile(datatemp,datanametemp,outcome)
+    results <- rbind.fill(resulttemp,results)
+    print(paste(i,j,sep="---"))
+  }
+  
+  results <- results %>% 
+    as_tibble() %>% 
+    add_row(label=outcome, Outcome=outcome, .before=1) %>% 
+    as.data.frame()
+  
+  # interaction
+  covariate_formula <- "Age_current+eGFR_test_value+SBP+CCI+IHD+NT_proBNP_test_value+
+  insulin+venous_loop_diuretics+Sex_fromID+Department"
+  ps.formula <- as.formula(paste0("ratio ~ ", covariate_formula))
+  w1 <- weightit(ps.formula,
+                 data = data,
+                 method = "ebal",
+                 distribution='multinomial',
+                 estimand = "ATE",
+                 stabilize = TRUE)
+  
+  data$ipw <- w1$weights
+  
+  ##plot for assessment of covariates balance
+  balance_list[[i]] <- love.plot(w1,
+                                 stats =  c("m"), 
+                                 drop.distance = TRUE,
+                                 abs = TRUE, 
+                                 wrap = 20,
+                                 line = TRUE,
+                                 var.order = "unadjusted",
+                                 sample.names = c("Unadjusted", "Weights adjusted"),
+                                 position = "right", 
+                                 shapes = c("circle", "triangle"),
+                                 colors = c("#1c77a3ff", "#c5a387ff"),
+                                 title = paste0(A_list[i]),
+                                 themes=theme(legend.title = element_blank()))+
+    scale_y_discrete(labels =  c('Department_Others'= "Department (Cardiology/Others)",
+                                 'Sex_fromID_Male' = "Sex",
+                                 "SBP"="Systolic BP",
+                                 "Age_current"="Age",
+                                 "NT_proBNP_test_value"="NT-proBNP",
+                                 "eGFR_test_value"="eGFR",
+                                 "insulin"="Use of insulin (Y/N)",
+                                 "venous_loop_diuretics" = "Use of venous loop diuretics (Y/N)"))+
+    theme(legend.text = element_text(size = 28, color="grey20"),
+          legend.title =  element_text(size = 28, color="grey20"),
+          axis.text = element_text(size = 18, color="grey20"),
+          axis.title =  element_text(size = 18, color="grey20"),
+          plot.title= element_text(size = 30, color="grey20",face="bold",hjust=0))
+  
+  term_set <- c("CKD", "HbA1c_group", "NYHA") # CKD variable is baseline eGFR <60 mL/min/1.73 m²
+  
+  for(k in 1:length(term_set)){
+    termtemp <- term_set[[k]]
+    temp <- fun_glm_tertile_interaction(termtemp, outcome)
+    results_interaction <- rbind.fill(results_interaction,temp)
+  }
+}
+
+###create one plot of covariates balance for primary outcomes---combine plots above [1st,2nd,3rd]as one plot  
+png(file.path(pathout_tertile, "balance_tertile_primary outcomes.png"), height=300*12, width=300*22, res=300)
+ggarrange(balance_list[[1]],
+          balance_list[[2]]+ 
+            theme(axis.title.y = element_blank(),
+                  axis.text.y = element_blank()),
+          balance_list[[3]]+
+            theme(axis.title.y = element_blank(),
+                  axis.text.y =  element_blank()),
+          ncol=3, nrow=1, common.legend = TRUE, align="hv", legend="bottom")
+dev.off()
+
+#tidy results
+results$ORCI[results$ORCI=='NA (NA to NA)'] <- NA
+results$ORCI[results$ORCI=='1.00 (NA to NA)'] <- NA
+
+write_xlsx(results_interaction,file.path(pathout_tertile,"interaction_logisitc.xlsx"))
+write_xlsx(results,file.path(pathout_tertile,"logistic.xlsx"))
+```
+### forest plot of total population for priamry and secondary outcomes, separately---
+```{r}
+library(forestplot)
+result_list <- results %>% 
+  split(., f=factor(results$Outcome))
+
+# forest plot for primary outcomes
+PrimaryOutcomes <- bind_rows(result_list$Composite[2:5,], result_list$AKI_stage23[2:5,], 
+                     result_list$Restricted_antibiotics[2:5,]) %>% 
+  as_tibble() %>% 
+  mutate(label = case_when(
+    label == "Total" ~ Outcome,
+    TRUE ~ label
+  )) %>% 
+  mutate(p_value = p.value %>% 
+           as.numeric() %>% sprintf("%.2f",.)) %>% 
+  mutate(p_value = case_when(
+    p_value %in% c("0.00", "NA") ~ p.value,
+    TRUE ~ p_value
+  )) %>% 
+  add_row(label = "Outcome", ORCI = "Odds ratio (95% CI)", `n of N` = "n of N", p_value = "P value", .before= 1) %>%
+  dplyr::select("label","n of N", "estimate", "conf.low", "conf.high", "ORCI", "p_value") %>% 
+  mutate(label = case_when(
+    label == "First tertile" ~ "   First tertile of SHR",
+    label == "Second tertile" ~ "   Second tertile of SHR",
+    label == "Third tertile" ~ "   Third tertile of SHR",
+    TRUE ~ label
+  )) %>% 
+  mutate(label = case_when(
+    label == "Composite" ~ "Composite of cardiac events",
+    label == "AKI_stage23" ~ "Major AKI",
+    label == "Restricted_antibiotics" ~ "Major systemic infection",
+    TRUE ~ label
+  )) %>% 
+  mutate_at(vars("estimate", "conf.low", "conf.high"), as.numeric) 
+
+text <- c("label","n of N", "ORCI", "p_value" )
+
+tiff(file.path(pathout_tertile,"Total-OR forest primary outcome.tiff"),height = 300*8, width =300*16,res= 300)
+p <- forestplot (labeltext = as.matrix(PrimaryOutcomes[,text]),#设置用于文本展示的列,在图中展示
+                 mean=PrimaryOutcomes$estimate,
+                 lower=PrimaryOutcomes$conf.low,
+                 upper=PrimaryOutcomes$conf.high,
+                 is.summary=c(T,T,F,F,F,T,F,F,F,T,F,F,F),
+                 hrzl_lines=list("1" = gpar(lwd=2, col="#1c77a3ff"),
+                                 "2" = gpar(lty=1, col="#1c77a3ff")),
+                 graphwidth = unit(7, 'cm'),
+                 xlog=TRUE,
+                 xlab= "Estimates of relative risk",
+                 lineheight = 'auto',
+                 line.margin =unit(3, 'mm'),
+                 clip=c(0.7,3.6),
+                 xticks = c(0.7, 1.0,1.3, 1.9, 2.5, 3.5),
+                 txt_gp=fpTxtGp(label=gpar(cex=1.2),
+                                summary=gpar(cex=1.35, fontface='bold'),
+                                ticks=gpar(cex=1.2),
+                                xlab=gpar(cex = 1.4),
+                                title=gpar(cex = 1.35)),
+                 
+                 col=fpColors(box="#1c77a3ff", lines="#c5a387ff", zero = "gray50"),
+                 zero=1, cex=1,  boxsize=0.2, colgap=unit(1,"cm"),
+                 lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.2,
+                 graph.pos=4)
+print(p)
+dev.off()
+
+# forest plot for secondary outcomes
+SecondaryOutcomes <- bind_rows(result_list$death[2:5,], result_list$CPR[2:5,], 
+                     result_list$Cardiogenic_shock[2:5,], result_list$AHF[2:5,],
+                     result_list$AKI[2:5,], result_list$Infect[2:5,]) %>% 
+  as_tibble() %>% 
+  mutate(label = case_when(
+    label == "Total" ~ Outcome,
+    TRUE ~ label
+  )) %>% 
+  mutate(p_value = p.value %>% 
+           as.numeric() %>% sprintf("%.2f",.)) %>% 
+  mutate(p_value = case_when(
+    p_value %in% c("0.00", "NA") ~ p.value,
+    TRUE ~ p_value
+  )) %>% 
+  add_row(label = "Outcome", ORCI = "Odds ratio (95% CI)", `n of N` = "n of N", p_value = "P value", .before= 1) %>%
+  dplyr::select("label","n of N", "estimate", "conf.low", "conf.high", "ORCI", "p_value") %>% 
+  mutate(label = case_when(
+    label == "First tertile" ~ "   First tertile of SHR",
+    label == "Second tertile" ~ "   Second tertile of SHR",
+    label == "Third tertile" ~ "   Third tertile of SHR",
+    TRUE ~ label
+  )) %>% 
+  mutate(label = case_when(
+    label == "death" ~ "Death during hospitalization",
+    label == "CPR"  ~  "Requiring cardiopulmonary resuscitation",
+    label == "Cardiogenic_shock" ~ "Cardiogenic shock",
+    label == "AHF" ~ "New episode of AHF after admission",
+    label == "AKI" ~ "AKI at any stage",
+    label == "Infect"  ~ "Initiating any antibiotics",
+    TRUE ~ label
+  )) %>% 
+  mutate_at(vars("estimate", "conf.low", "conf.high"), as.numeric) 
+
+text <- c("label","n of N", "ORCI", "p_value" )
+
+png(file.path(pathout_tertile,"Total-OR forest secondary outcome.png"),height = 300*10, width =300*16,res= 300)
+p <- forestplot (labeltext = as.matrix(SecondaryOutcomes[,text]),#设置用于文本展示的列,在图中展示
+                 mean=SecondaryOutcomes$estimate,
+                 lower=SecondaryOutcomes$conf.low,
+                 upper=SecondaryOutcomes$conf.high,
+                 is.summary=c(T,T,F,F,F,T,F,F,F,T,F,F,F,T,F,F,F,T,F,F,F,T,F,F,F),
+                 hrzl_lines=list("1" = gpar(lwd=2, col="#1c77a3ff"),
+                                 "2" = gpar(lty=1, col="#1c77a3ff")),
+                 graphwidth = unit(7, 'cm'),
+                 xlog=TRUE,
+                 xlab= "Estimates of relative risk",
+                 lineheight = 'auto',
+                 line.margin =unit(3, 'mm'),
+                 clip=c(0.4,3.6),
+                 xticks = c(0.4, 0.7, 1.0, 1.5, 2.0, 3.0, 3.5),
+                 txt_gp=fpTxtGp(label=gpar(cex=1.2),
+                                summary=gpar(cex=1.35, fontface='bold'),
+                                ticks=gpar(cex=1.2),
+                                xlab=gpar(cex = 1.4),
+                                title=gpar(cex = 1.35)),
+                 
+                 col=fpColors(box="#1c77a3ff", lines="#c5a387ff", zero = "gray50"),
+                 zero=1, cex=1,  boxsize=0.2, colgap=unit(1,"cm"),
+                 lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.2,
+                 graph.pos=4)
+print(p)
+dev.off()
+```
+!!!!!!!!!
+# 2.sensitivity analysis - exclude glucose>16.7
+admission blood glucose>16.7 243 ID
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/Stress hyperglycemia in diabetes and HF/SHR/Data analysis/Step 4 logistic regression/Output/exclude high admission glucose"
+```
+## nonlinear analysis----
+### ipw assessment plot----
+covariates: Age_current+eGFR_test_value+SBP+CCI+IHD+NT_proBNP+insulin+venous_loop_diuretics+Sex_fromID+Department
+```{r}
+dir.create(paste0(pathout, "/nonlinear results"))
+path_nonlinear <- paste0(pathout, "/nonlinear results")
+
+A_list <- c("A ","B ","C ","A ","B ","C ",'D ','E ',"F ")
+balance_list <- list()
+
+for(i in 1:length(outcomes)){
+  data <- data_list_new[[i]]
+  outcome <- outcomes[i]
+  time <- survival_times[i]
+  data <- data %>% 
+    as.data.frame() %>% 
+    filter(Glucose <=16.7)
+  
+  #ipw balance assessment plot
+  ##ipw- entropy balance
+  covariate_formula <- "Age_current+ eGFR_test_value+ SBP+ CCI+ IHD+ NT_proBNP_test_value+ 
+  insulin+ venous_loop_diuretics+ Sex_fromID+ Department"
+  
+  ps.formula <- as.formula(paste0("SHR ~ ", covariate_formula))
+  w1 <- weightit(ps.formula,
+                 data = data,
+                 method = "ebal",
+                 estimand = "ATE",
+                 stabilize = TRUE)
+  
+  set.cobalt.options(binary = "std")
+
+  balance <- bal.tab(w1,un = TRUE, 
+                     thresholds = c(m = 0.1))
+
+  ##plot for assessment of covariates balance
+  balance_list[[i]] <- love.plot(w1,
+                                 stats =  c("c"), 
+                                 drop.distance = TRUE,
+                                 abs = TRUE, 
+                                 wrap = 20,
+                                 line = TRUE,
+                                 var.order = "unadjusted",
+                                 sample.names = c("Unadjusted", "Weights adjusted"),
+                                 position = "right", 
+                                 shapes = c("circle", "triangle"),
+                                 colors = c("#1c77a3ff", "#c5a387ff"),
+                                 title = paste0(A_list[i]),
+                                 themes=theme(legend.title = element_blank()))+
+    scale_y_discrete(labels =  c('Department_Others'= "Department (Cardiology/Others)",
+                                 'Sex_fromID_Male' = "Sex",
+                                 "SBP"="Systolic BP",
+                                 "Age_current"="Age",
+                                 "NT_proBNP_test_value"="NT-proBNP",
+                                 "eGFR_test_value"="eGFR",
+                                 "insulin"="Use of insulin (Y/N)",
+                                 "venous_loop_diuretics" = "Use of venous loop diuretics (Y/N)"))+
+    theme(legend.text = element_text(size = 28, color="grey20"),
+          legend.title =  element_text(size = 28, color="grey20"),
+          axis.text = element_text(size = 18, color="grey20"),
+          axis.title =  element_text(size = 18, color="grey20"),
+          plot.title= element_text(size = 30, color="grey20",face="bold",hjust=0))
+}
+
+###create one plot of covariates balance for primary outcomes---combine plots above [1st,2nd,3rd]as one plot  
+png(file.path(path_nonlinear, "balance_nonlinear_primary outcomes.png"), height=300*12, width=300*22, res=300)
+ggarrange(balance_list[[1]],
+          balance_list[[2]]+ 
+            theme(axis.title.y = element_blank(),
+                  axis.text.y = element_blank()),
+          balance_list[[3]]+
+            theme(axis.title.y = element_blank(),
+                  axis.text.y =  element_blank()),
+          ncol=3, nrow=1, common.legend = TRUE, align="hv", legend="bottom")
+dev.off()
+```
+###nonlinear model in the total population----
+using functions in Code_functions_nonlinear: fun_boot_glm_nonlinear
+```{r}
+dir.create(paste0(pathout, "/nonlinear results"))
+path_nonlinear <- paste0(pathout, "/nonlinear results")
+ 
+A_list <- c("A ","B ","C ","A ","B ","C ",'D ','E ',"F ")
+#define exposure formal name
+xname <- "Stress hyperglycemia ratio"
+
+for(i in 1:length(outcomes)){
+  #define outcome
+  outcome <- outcomes[i]
+  #define parameter for fun_boot_glm_nonlinear function
+  ##original data
+  dt <- data_list_new[[i]]%>% 
+    as_tibble() %>% 
+    filter(Glucose <=16.7)
+  ##predict data
+  dt_new <- tibble(SHR = seq(0.4, 2.0, 0.01)) 
+  ##ipw formula
+  covariate_formula <- "Age_current+ eGFR_test_value+ SBP+ CCI+ IHD+ 
+  NT_proBNP_test_value+ insulin+ venous_loop_diuretics+ Sex_fromID+ Department"
+  ps_formula <- as.formula(paste0("SHR ~ ", covariate_formula))
+  ##glm formula
+  glm_formula <- as.formula(paste0(outcome, " ~ splines::ns(SHR, 4)"))
+  ##define exposure
+  exposure <- "SHR"
+  #bootstrap estimate the 95%CI and OR for each SHR
+  dt_plot <- fun_boot_glm_nonlinear(data = dt,
+                                    n_rep = 500, 
+                                    ps.formula = ps_formula, 
+                                    glm.formula = glm_formula, 
+                                    data_new  = dt_new, 
+                                    exposure = exposure)
+  
+  #truncated CI for major AKI and major infection
+  if(outcome %in% c("AKI_stage23", "Restricted_antibiotics")){
+    dt_plot <- dt_plot %>% 
+      mutate(confin.high = case_when(
+        confin.high >2 ~ 2,
+        TRUE ~ confin.high
+      ))
+  }
+  
+  #plot OR of each SHR for given outcome
+  ##nonlinear association of SHR (x-axis) with OR (y-axis)##
+  dt_plot %>% 
+    ggplot(aes(SHR, OR))+
+    geom_ribbon(aes(SHR, ymin = confin.low, ymax = confin.high), alpha = 0.3, fill = "#f5DCD7")+
+    geom_line(colour = "#ba414a", size = 1.5) +
+    theme_classic() +
+    labs(x = xname, y = "Odds ratio (95% CI)", title = paste0(A_list[i], outcome_name[i]))+
+    scale_x_continuous(breaks = seq(0.6, 1.3, 0.1), limits = c(0.6, 1.3),
+                       labels= c("≤0.6", "0.7","0.8","0.9","1.0","1.1","1.2","≥1.3"))+
+    geom_hline(yintercept=1, linetype=2, size=1, color="#c5a387ff")+
+    theme(plot.title= element_text(color="grey20",face="italic",hjust=0)) 
+
+  ggsave(file.path(path_nonlinear, paste0(outcome," OR.tiff")), plot = last_plot(), 
+       width = 8, height = 6, units = "in")
+} 
+```
+## glm model of categorical exposure in the total population and subgroups: tertile analysis----
+```{r}
+ratio_levels <- c("Second tertile", "First tertile", "Third tertile")
+
+dir.create(paste0(pathout, "/tertile results"))
+pathout_tertile <- paste0(pathout, "/tertile results")
+# catgorical 
+results <- data.frame()
+results_interaction <- data.frame()
+
+balance_list <- list()
+
+for (i in 1:length(outcomes)){
+  data <- data_list_new[[i]] %>% 
+    as_tibble() %>% 
+    filter(Glucose <=16.7) 
+  
+  outcome <- outcomes[i]
+
+  data <- data %>% 
+    as_tibble() %>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    ))
+  
+  data$ratio <- factor(data$ratio, levels = ratio_levels)
+  
+  # subset data
+  data_HbA1c_high <- data %>% 
+    subset(HbA1c_group=="1") %>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_HbA1c_low <- data %>% 
+    subset(HbA1c_group=="0")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_NYHA_class23 <- data %>% 
+    subset(NYHA=="0")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_NYHA_class4 <- data %>% 
+    subset(NYHA=="1")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_CKD <- data %>% 
+    subset(eGFR_test_value <60)%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_noCKD <- data %>% 
+    subset(eGFR_test_value >=60)%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+
+  datasets <- list(data_noCKD, data_CKD, data_HbA1c_high, data_HbA1c_low, 
+                   data_NYHA_class4,data_NYHA_class23,data)
+  datanames <- c("eGFR ≥60 mL/min/1.73 m²", "eGFR <60 mL/min/1.73 m²", 'HbA1c ≥7.0%', 'HbA1c <7.0%',
+                 "NYHA class 4","NYHA class 2 or 3",'Total')
+
+  for(j in 1:length(datasets)){
+    datatemp <- datasets[[j]]
+    datanametemp <- datanames[j]
+    resulttemp <- fun_glm_tertile(datatemp,datanametemp,outcome)
+    results <- rbind.fill(resulttemp,results)
+    print(paste(i,j,sep="---"))
+  }
+  
+  results <- results %>% 
+    as_tibble() %>% 
+    add_row(label=outcome, Outcome=outcome, .before=1) %>% 
+    as.data.frame()
+  
+  # interaction
+  covariate_formula <- "Age_current+eGFR_test_value+SBP+CCI+IHD+NT_proBNP_test_value+
+  insulin+venous_loop_diuretics+Sex_fromID+Department"
+  ps.formula <- as.formula(paste0("ratio ~ ", covariate_formula))
+  w1 <- weightit(ps.formula,
+                 data = data,
+                 method = "ebal",
+                 distribution='multinomial',
+                 estimand = "ATE",
+                 stabilize = TRUE)
+  
+  data$ipw <- w1$weights
+  
+  ##plot for assessment of covariates balance
+  balance_list[[i]] <- love.plot(w1,
+                                 stats =  c("m"), 
+                                 drop.distance = TRUE,
+                                 abs = TRUE, 
+                                 wrap = 20,
+                                 line = TRUE,
+                                 var.order = "unadjusted",
+                                 sample.names = c("Unadjusted", "Weights adjusted"),
+                                 position = "right", 
+                                 shapes = c("circle", "triangle"),
+                                 colors = c("#1c77a3ff", "#c5a387ff"),
+                                 title = paste0(A_list[i]),
+                                 themes=theme(legend.title = element_blank()))+
+    scale_y_discrete(labels =  c('Department_Others'= "Department (Cardiology/Others)",
+                                 'Sex_fromID_Male' = "Sex",
+                                 "SBP"="Systolic BP",
+                                 "Age_current"="Age",
+                                 "NT_proBNP_test_value"="NT-proBNP",
+                                 "eGFR_test_value"="eGFR",
+                                 "insulin"="Use of insulin (Y/N)",
+                                 "venous_loop_diuretics" = "Use of venous loop diuretics (Y/N)"))+
+    theme(legend.text = element_text(size = 28, color="grey20"),
+          legend.title =  element_text(size = 28, color="grey20"),
+          axis.text = element_text(size = 18, color="grey20"),
+          axis.title =  element_text(size = 18, color="grey20"),
+          plot.title= element_text(size = 30, color="grey20",face="bold",hjust=0))
+  
+  term_set <- c("CKD", "HbA1c_group", "NYHA") # CKD variable is baseline eGFR <60 mL/min/1.73 m²
+  
+  for(k in 1:length(term_set)){
+    termtemp <- term_set[[k]]
+    temp <- fun_glm_tertile_interaction(termtemp, outcome)
+    results_interaction <- rbind.fill(results_interaction,temp)
+  }
+}
+
+###create one plot of covariates balance for primary outcomes---combine plots above [1st,2nd,3rd]as one plot  
+png(file.path(pathout_tertile, "balance_tertile_primary outcomes.png"), height=300*12, width=300*22, res=300)
+ggarrange(balance_list[[1]],
+          balance_list[[2]]+ 
+            theme(axis.title.y = element_blank(),
+                  axis.text.y = element_blank()),
+          balance_list[[3]]+
+            theme(axis.title.y = element_blank(),
+                  axis.text.y =  element_blank()),
+          ncol=3, nrow=1, common.legend = TRUE, align="hv", legend="bottom")
+dev.off()
+
+#tidy results
+results$ORCI[results$ORCI=='NA (NA to NA)'] <- NA
+results$ORCI[results$ORCI=='1.00 (NA to NA)'] <- NA
+
+write_xlsx(results_interaction,file.path(pathout_tertile,"interaction_logisitc.xlsx"))
+write_xlsx(results,file.path(pathout_tertile,"logistic.xlsx"))
+```
+### forest plot of total population for priamry and secondary outcomes, separately---
+```{r}
+library(forestplot)
+result_list <- results %>% 
+  split(., f=factor(results$Outcome))
+
+# forest plot for primary outcomes
+PrimaryOutcomes <- bind_rows(result_list$Composite[2:5,], result_list$AKI_stage23[2:5,], 
+                     result_list$Restricted_antibiotics[2:5,]) %>% 
+  as_tibble() %>% 
+  mutate(label = case_when(
+    label == "Total" ~ Outcome,
+    TRUE ~ label
+  )) %>% 
+  mutate(p_value = p.value %>% 
+           as.numeric() %>% sprintf("%.2f",.)) %>% 
+  mutate(p_value = case_when(
+    p_value %in% c("0.00", "NA") ~ p.value,
+    TRUE ~ p_value
+  )) %>% 
+  add_row(label = "Outcome", ORCI = "Odds ratio (95% CI)", `n of N` = "n of N", p_value = "P value", .before= 1) %>%
+  dplyr::select("label","n of N", "estimate", "conf.low", "conf.high", "ORCI", "p_value") %>% 
+  mutate(label = case_when(
+    label == "First tertile" ~ "   First tertile of SHR",
+    label == "Second tertile" ~ "   Second tertile of SHR",
+    label == "Third tertile" ~ "   Third tertile of SHR",
+    TRUE ~ label
+  )) %>% 
+  mutate(label = case_when(
+    label == "Composite" ~ "Composite of cardiac events",
+    label == "AKI_stage23" ~ "Major AKI",
+    label == "Restricted_antibiotics" ~ "Major systemic infection",
+    TRUE ~ label
+  )) %>% 
+  mutate_at(vars("estimate", "conf.low", "conf.high"), as.numeric) 
+
+text <- c("label","n of N", "ORCI", "p_value" )
+
+tiff(file.path(pathout_tertile,"Total-OR forest primary outcome.tiff"),height = 300*8, width =300*16,res= 300)
+p <- forestplot (labeltext = as.matrix(PrimaryOutcomes[,text]),#设置用于文本展示的列,在图中展示
+                 mean=PrimaryOutcomes$estimate,
+                 lower=PrimaryOutcomes$conf.low,
+                 upper=PrimaryOutcomes$conf.high,
+                 is.summary=c(T,T,F,F,F,T,F,F,F,T,F,F,F),
+                 hrzl_lines=list("1" = gpar(lwd=2, col="#1c77a3ff"),
+                                 "2" = gpar(lty=1, col="#1c77a3ff")),
+                 graphwidth = unit(7, 'cm'),
+                 xlog=TRUE,
+                 xlab= "Estimates of relative risk",
+                 lineheight = 'auto',
+                 line.margin =unit(3, 'mm'),
+                 clip=c(0.7,3.6),
+                 xticks = c(0.7, 1.0,1.3, 1.9, 2.5, 3.5),
+                 txt_gp=fpTxtGp(label=gpar(cex=1.2),
+                                summary=gpar(cex=1.35, fontface='bold'),
+                                ticks=gpar(cex=1.2),
+                                xlab=gpar(cex = 1.4),
+                                title=gpar(cex = 1.35)),
+                 
+                 col=fpColors(box="#1c77a3ff", lines="#c5a387ff", zero = "gray50"),
+                 zero=1, cex=1,  boxsize=0.2, colgap=unit(1,"cm"),
+                 lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.2,
+                 graph.pos=4)
+print(p)
+dev.off()
+
+# forest plot for secondary outcomes
+SecondaryOutcomes <- bind_rows(result_list$death[2:5,], result_list$CPR[2:5,], 
+                     result_list$Cardiogenic_shock[2:5,], result_list$AHF[2:5,],
+                     result_list$AKI[2:5,], result_list$Infect[2:5,]) %>% 
+  as_tibble() %>% 
+  mutate(label = case_when(
+    label == "Total" ~ Outcome,
+    TRUE ~ label
+  )) %>% 
+  mutate(p_value = p.value %>% 
+           as.numeric() %>% sprintf("%.2f",.)) %>% 
+  mutate(p_value = case_when(
+    p_value %in% c("0.00", "NA") ~ p.value,
+    TRUE ~ p_value
+  )) %>% 
+  add_row(label = "Outcome", ORCI = "Odds ratio (95% CI)", `n of N` = "n of N", p_value = "P value", .before= 1) %>%
+  dplyr::select("label","n of N", "estimate", "conf.low", "conf.high", "ORCI", "p_value") %>% 
+  mutate(label = case_when(
+    label == "First tertile" ~ "   First tertile of SHR",
+    label == "Second tertile" ~ "   Second tertile of SHR",
+    label == "Third tertile" ~ "   Third tertile of SHR",
+    TRUE ~ label
+  )) %>% 
+  mutate(label = case_when(
+    label == "death" ~ "Death during hospitalization",
+    label == "CPR"  ~  "Requiring cardiopulmonary resuscitation",
+    label == "Cardiogenic_shock" ~ "Cardiogenic shock",
+    label == "AHF" ~ "New episode of AHF after admission",
+    label == "AKI" ~ "AKI at any stage",
+    label == "Infect"  ~ "Initiating any antibiotics",
+    TRUE ~ label
+  )) %>% 
+  mutate_at(vars("estimate", "conf.low", "conf.high"), as.numeric) 
+
+text <- c("label","n of N", "ORCI", "p_value" )
+
+png(file.path(pathout_tertile,"Total-OR forest secondary outcome.png"),height = 300*10, width =300*16,res= 300)
+p <- forestplot (labeltext = as.matrix(SecondaryOutcomes[,text]),#设置用于文本展示的列,在图中展示
+                 mean=SecondaryOutcomes$estimate,
+                 lower=SecondaryOutcomes$conf.low,
+                 upper=SecondaryOutcomes$conf.high,
+                 is.summary=c(T,T,F,F,F,T,F,F,F,T,F,F,F,T,F,F,F,T,F,F,F,T,F,F,F),
+                 hrzl_lines=list("1" = gpar(lwd=2, col="#1c77a3ff"),
+                                 "2" = gpar(lty=1, col="#1c77a3ff")),
+                 graphwidth = unit(7, 'cm'),
+                 xlog=TRUE,
+                 xlab= "Estimates of relative risk",
+                 lineheight = 'auto',
+                 line.margin =unit(3, 'mm'),
+                 clip=c(0.4,3.6),
+                 xticks = c(0.4, 0.7, 1.0, 1.5, 2.0, 3.0, 3.5),
+                 txt_gp=fpTxtGp(label=gpar(cex=1.2),
+                                summary=gpar(cex=1.35, fontface='bold'),
+                                ticks=gpar(cex=1.2),
+                                xlab=gpar(cex = 1.4),
+                                title=gpar(cex = 1.35)),
+                 
+                 col=fpColors(box="#1c77a3ff", lines="#c5a387ff", zero = "gray50"),
+                 zero=1, cex=1,  boxsize=0.2, colgap=unit(1,"cm"),
+                 lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.2,
+                 graph.pos=4)
+print(p)
+dev.off()
+```
+
+
+
+# 3.sensitivity analysis - exclude hyperglycemia crises
+The criteria of a hyperglycemic crisis included patients at baseline with 1) any blood glucose ≥ 30mmol/L; 2) serum sodium > 145 mmol/L and any blood glucose ≥ 16.7 mmol/L; 3) with any blood glucose ≥ 13.9mmol/L and any of the following: PH <7.3, beta hydroxybutyric acid ≥ 1 mmol/L, or urine ketone ≥ 2+; or 4) were diagnosed with diabetic ketoacidosis (DKA) or hyperglycemic hyperosmolar state (HHS)
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/Stress hyperglycemia in diabetes and HF/SHR/Data analysis/Step 4 logistic regression/Output/exclude DKAHHS"
+
+dt_exclude <- fread("/Users/yilingzhou/~Reaearch/Stress hyperglycemia in diabetes and HF/SHR/Data analysis/Step 1 study population selection and their baseline/Output/hyperglycemia crises/DKAHHS episodes around admission.csv")
+```
+## nonlinear analysis----
+### ipw assessment plot----
+covariates: Age_current+eGFR_test_value+SBP+CCI+IHD+NT_proBNP+insulin+venous_loop_diuretics+Sex_fromID+Department
+```{r}
+dir.create(paste0(pathout, "/nonlinear results"))
+path_nonlinear <- paste0(pathout, "/nonlinear results")
+
+A_list <- c("A ","B ","C ","A ","B ","C ",'D ','E ',"F ")
+balance_list <- list()
+
+for(i in 1:length(outcomes)){
+  data <- data_list_new[[i]]
+  outcome <- outcomes[i]
+  time <- survival_times[i]
+  data <- data %>% 
+    as.data.frame() %>% 
+    filter(!anonymousID %in% dt_exclude$anonymousID)
+  
+  #ipw balance assessment plot
+  ##ipw- entropy balance
+  covariate_formula <- "Age_current+ eGFR_test_value+ SBP+ CCI+ IHD+ NT_proBNP_test_value+ 
+  insulin+ venous_loop_diuretics+ Sex_fromID+ Department"
+  
+  ps.formula <- as.formula(paste0("SHR ~ ", covariate_formula))
+  w1 <- weightit(ps.formula,
+                 data = data,
+                 method = "ebal",
+                 estimand = "ATE",
+                 stabilize = TRUE)
+  
+  set.cobalt.options(binary = "std")
+
+  balance <- bal.tab(w1,un = TRUE, 
+                     thresholds = c(m = 0.1))
+
+  ##plot for assessment of covariates balance
+  balance_list[[i]] <- love.plot(w1,
+                                 stats =  c("c"), 
+                                 drop.distance = TRUE,
+                                 abs = TRUE, 
+                                 wrap = 20,
+                                 line = TRUE,
+                                 var.order = "unadjusted",
+                                 sample.names = c("Unadjusted", "Weights adjusted"),
+                                 position = "right", 
+                                 shapes = c("circle", "triangle"),
+                                 colors = c("#1c77a3ff", "#c5a387ff"),
+                                 title = paste0(A_list[i]),
+                                 themes=theme(legend.title = element_blank()))+
+    scale_y_discrete(labels =  c('Department_Others'= "Department (Cardiology/Others)",
+                                 'Sex_fromID_Male' = "Sex",
+                                 "SBP"="Systolic BP",
+                                 "Age_current"="Age",
+                                 "NT_proBNP_test_value"="NT-proBNP",
+                                 "eGFR_test_value"="eGFR",
+                                 "insulin"="Use of insulin (Y/N)",
+                                 "venous_loop_diuretics" = "Use of venous loop diuretics (Y/N)"))+
+    theme(legend.text = element_text(size = 28, color="grey20"),
+          legend.title =  element_text(size = 28, color="grey20"),
+          axis.text = element_text(size = 18, color="grey20"),
+          axis.title =  element_text(size = 18, color="grey20"),
+          plot.title= element_text(size = 30, color="grey20",face="bold",hjust=0))
+}
+
+###create one plot of covariates balance for primary outcomes---combine plots above [1st,2nd,3rd]as one plot  
+png(file.path(path_nonlinear, "balance_nonlinear_primary outcomes.png"), height=300*12, width=300*22, res=300)
+ggarrange(balance_list[[1]],
+          balance_list[[2]]+ 
+            theme(axis.title.y = element_blank(),
+                  axis.text.y = element_blank()),
+          balance_list[[3]]+
+            theme(axis.title.y = element_blank(),
+                  axis.text.y =  element_blank()),
+          ncol=3, nrow=1, common.legend = TRUE, align="hv", legend="bottom")
+dev.off()
+```
+###nonlinear model in the total population----
+using functions in Code_functions_nonlinear: fun_boot_glm_nonlinear
+```{r}
+dir.create(paste0(pathout, "/nonlinear results"))
+path_nonlinear <- paste0(pathout, "/nonlinear results")
+ 
+A_list <- c("A ","B ","C ","A ","B ","C ",'D ','E ',"F ")
+#define exposure formal name
+xname <- "Stress hyperglycemia ratio"
+
+for(i in 1:length(outcomes)){
+  #define outcome
+  outcome <- outcomes[i]
+  #define parameter for fun_boot_glm_nonlinear function
+  ##original data
+  dt <- data_list_new[[i]]%>% 
+    as_tibble() %>% 
+    filter(!anonymousID %in% dt_exclude$anonymousID)
+  ##predict data
+  dt_new <- tibble(SHR = seq(0.4, 2.0, 0.01)) 
+  ##ipw formula
+  covariate_formula <- "Age_current+ eGFR_test_value+ SBP+ CCI+ IHD+ 
+  NT_proBNP_test_value+ insulin+ venous_loop_diuretics+ Sex_fromID+ Department"
+  ps_formula <- as.formula(paste0("SHR ~ ", covariate_formula))
+  ##glm formula
+  glm_formula <- as.formula(paste0(outcome, " ~ splines::ns(SHR, 4)"))
+  ##define exposure
+  exposure <- "SHR"
+  #bootstrap estimate the 95%CI and OR for each SHR
+  dt_plot <- fun_boot_glm_nonlinear(data = dt,
+                                    n_rep = 500, 
+                                    ps.formula = ps_formula, 
+                                    glm.formula = glm_formula, 
+                                    data_new  = dt_new, 
+                                    exposure = exposure)
+  
+  #truncated CI for major AKI and major infection
+  if(outcome %in% c("AKI_stage23", "Restricted_antibiotics")){
+    dt_plot <- dt_plot %>% 
+      mutate(confin.high = case_when(
+        confin.high >2 ~ 2,
+        TRUE ~ confin.high
+      ))
+  }
+  
+  #plot OR of each SHR for given outcome
+  ##nonlinear association of SHR (x-axis) with OR (y-axis)##
+  dt_plot %>% 
+    ggplot(aes(SHR, OR))+
+    geom_ribbon(aes(SHR, ymin = confin.low, ymax = confin.high), alpha = 0.3, fill = "#f5DCD7")+
+    geom_line(colour = "#ba414a", size = 1.5) +
+    theme_classic() +
+    labs(x = xname, y = "Odds ratio (95% CI)", title = paste0(A_list[i], outcome_name[i]))+
+    scale_x_continuous(breaks = seq(0.6, 1.3, 0.1), limits = c(0.6, 1.3),
+                       labels= c("≤0.6","0.7","0.8","0.9","1.0","1.1","1.2","≥1.3"))+
+    geom_hline(yintercept=1, linetype=2, size=1, color="#c5a387ff")+
+    theme(plot.title= element_text(color="grey20",face="italic",hjust=0)) -> p
+
+  ggsave(file.path(path_nonlinear, paste0(outcome," OR.tiff")), plot = p, 
+       width = 8, height = 6, units = "in")
+} 
+```
+## glm model of categorical exposure in the total population and subgroups: tertile analysis----
+```{r}
+ratio_levels <- c("Second tertile", "First tertile", "Third tertile")
+
+dir.create(paste0(pathout, "/tertile results"))
+pathout_tertile <- paste0(pathout, "/tertile results")
+# catgorical 
+results <- data.frame()
+results_interaction <- data.frame()
+
+balance_list <- list()
+
+for (i in 1:length(outcomes)){
+  data <- data_list_new[[i]] %>% 
+    as_tibble() %>% 
+    filter(!anonymousID %in% dt_exclude$anonymousID)
+  
+  outcome <- outcomes[i]
+
+  data <- data %>% 
+    as_tibble() %>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    ))
+  
+  data$ratio <- factor(data$ratio, levels = ratio_levels)
+  
+  # subset data
+  data_HbA1c_high <- data %>% 
+    subset(HbA1c_group=="1") %>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_HbA1c_low <- data %>% 
+    subset(HbA1c_group=="0")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_NYHA_class23 <- data %>% 
+    subset(NYHA=="0")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_NYHA_class4 <- data %>% 
+    subset(NYHA=="1")%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_CKD <- data %>% 
+    subset(eGFR_test_value <60)%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+  
+  data_noCKD <- data %>% 
+    subset(eGFR_test_value >=60)%>% 
+    mutate(ratio = case_when(
+      SHR < as.numeric(quantile(SHR, 1/3)) ~ "First tertile",
+      SHR >= as.numeric(quantile(SHR, 1/3)) & SHR < as.numeric(quantile(SHR, 2/3)) ~ "Second tertile",
+      SHR >= as.numeric(quantile(SHR, 2/3)) ~ "Third tertile"
+    )) %>% 
+    mutate(ratio=factor(ratio, levels = ratio_levels))
+
+  datasets <- list(data_noCKD, data_CKD, data_HbA1c_high, data_HbA1c_low, 
+                   data_NYHA_class4,data_NYHA_class23,data)
+  datanames <- c("eGFR ≥60 mL/min/1.73 m²", "eGFR <60 mL/min/1.73 m²", 'HbA1c ≥7.0%', 'HbA1c <7.0%',
+                 "NYHA class 4","NYHA class 2 or 3",'Total')
+
+  for(j in 1:length(datasets)){
+    datatemp <- datasets[[j]]
+    datanametemp <- datanames[j]
+    resulttemp <- fun_glm_tertile(datatemp,datanametemp,outcome)
+    results <- rbind.fill(resulttemp,results)
+    print(paste(i,j,sep="---"))
+  }
+  
+  results <- results %>% 
+    as_tibble() %>% 
+    add_row(label=outcome, Outcome=outcome, .before=1) %>% 
+    as.data.frame()
+  
+  # interaction
+  covariate_formula <- "Age_current+eGFR_test_value+SBP+CCI+IHD+NT_proBNP_test_value+
+  insulin+venous_loop_diuretics+Sex_fromID+Department"
+  ps.formula <- as.formula(paste0("ratio ~ ", covariate_formula))
+  w1 <- weightit(ps.formula,
+                 data = data,
+                 method = "ebal",
+                 distribution='multinomial',
+                 estimand = "ATE",
+                 stabilize = TRUE)
+  
+  data$ipw <- w1$weights
+  
+  ##plot for assessment of covariates balance
+  balance_list[[i]] <- love.plot(w1,
+                                 stats =  c("m"), 
+                                 drop.distance = TRUE,
+                                 abs = TRUE, 
+                                 wrap = 20,
+                                 line = TRUE,
+                                 var.order = "unadjusted",
+                                 sample.names = c("Unadjusted", "Weights adjusted"),
+                                 position = "right", 
+                                 shapes = c("circle", "triangle"),
+                                 colors = c("#1c77a3ff", "#c5a387ff"),
+                                 title = paste0(A_list[i]),
+                                 themes=theme(legend.title = element_blank()))+
+    scale_y_discrete(labels =  c('Department_Others'= "Department (Cardiology/Others)",
+                                 'Sex_fromID_Male' = "Sex",
+                                 "SBP"="Systolic BP",
+                                 "Age_current"="Age",
+                                 "NT_proBNP_test_value"="NT-proBNP",
+                                 "eGFR_test_value"="eGFR",
+                                 "insulin"="Use of insulin (Y/N)",
+                                 "venous_loop_diuretics" = "Use of venous loop diuretics (Y/N)"))+
+    theme(legend.text = element_text(size = 28, color="grey20"),
+          legend.title =  element_text(size = 28, color="grey20"),
+          axis.text = element_text(size = 18, color="grey20"),
+          axis.title =  element_text(size = 18, color="grey20"),
+          plot.title= element_text(size = 30, color="grey20",face="bold",hjust=0))
+  
+  term_set <- c("CKD", "HbA1c_group", "NYHA") # CKD variable is baseline eGFR <60 mL/min/1.73 m²
+  
+  for(k in 1:length(term_set)){
+    termtemp <- term_set[[k]]
+    temp <- fun_glm_tertile_interaction(termtemp, outcome)
+    results_interaction <- rbind.fill(results_interaction,temp)
+  }
+}
+
+###create one plot of covariates balance for primary outcomes---combine plots above [1st,2nd,3rd]as one plot  
+png(file.path(pathout_tertile, "balance_tertile_primary outcomes.png"), height=300*12, width=300*22, res=300)
+ggarrange(balance_list[[1]],
+          balance_list[[2]]+ 
+            theme(axis.title.y = element_blank(),
+                  axis.text.y = element_blank()),
+          balance_list[[3]]+
+            theme(axis.title.y = element_blank(),
+                  axis.text.y =  element_blank()),
+          ncol=3, nrow=1, common.legend = TRUE, align="hv", legend="bottom")
+dev.off()
+
+#tidy results
+results$ORCI[results$ORCI=='NA (NA to NA)'] <- NA
+results$ORCI[results$ORCI=='1.00 (NA to NA)'] <- NA
+
+write_xlsx(results_interaction,file.path(pathout_tertile,"interaction_logisitc.xlsx"))
+write_xlsx(results,file.path(pathout_tertile,"logistic.xlsx"))
+```
+### forest plot of total population for priamry and secondary outcomes, separately---
+```{r}
+library(forestplot)
+result_list <- results %>% 
+  split(., f=factor(results$Outcome))
+
+# forest plot for primary outcomes
+PrimaryOutcomes <- bind_rows(result_list$Composite[2:5,], result_list$AKI_stage23[2:5,], 
+                     result_list$Restricted_antibiotics[2:5,]) %>% 
+  as_tibble() %>% 
+  mutate(label = case_when(
+    label == "Total" ~ Outcome,
+    TRUE ~ label
+  )) %>% 
+  mutate(p_value = p.value %>% 
+           as.numeric() %>% sprintf("%.2f",.)) %>% 
+  mutate(p_value = case_when(
+    p_value %in% c("0.00", "NA") ~ p.value,
+    TRUE ~ p_value
+  )) %>% 
+  add_row(label = "Outcome", ORCI = "Odds ratio (95% CI)", `n of N` = "n of N", p_value = "P value", .before= 1) %>%
+  dplyr::select("label","n of N", "estimate", "conf.low", "conf.high", "ORCI", "p_value") %>% 
+  mutate(label = case_when(
+    label == "First tertile" ~ "   First tertile of SHR",
+    label == "Second tertile" ~ "   Second tertile of SHR",
+    label == "Third tertile" ~ "   Third tertile of SHR",
+    TRUE ~ label
+  )) %>% 
+  mutate(label = case_when(
+    label == "Composite" ~ "Composite of cardiac events",
+    label == "AKI_stage23" ~ "Major AKI",
+    label == "Restricted_antibiotics" ~ "Major systemic infection",
+    TRUE ~ label
+  )) %>% 
+  mutate_at(vars("estimate", "conf.low", "conf.high"), as.numeric) 
+
+text <- c("label","n of N", "ORCI", "p_value" )
+
+tiff(file.path(pathout_tertile,"Total-OR forest primary outcome.tiff"),height = 300*8, width =300*16,res= 300)
+p <- forestplot (labeltext = as.matrix(PrimaryOutcomes[,text]),#设置用于文本展示的列,在图中展示
+                 mean=PrimaryOutcomes$estimate,
+                 lower=PrimaryOutcomes$conf.low,
+                 upper=PrimaryOutcomes$conf.high,
+                 is.summary=c(T,T,F,F,F,T,F,F,F,T,F,F,F),
+                 hrzl_lines=list("1" = gpar(lwd=2, col="#1c77a3ff"),
+                                 "2" = gpar(lty=1, col="#1c77a3ff")),
+                 graphwidth = unit(7, 'cm'),
+                 xlog=TRUE,
+                 xlab= "Estimates of relative risk",
+                 lineheight = 'auto',
+                 line.margin =unit(3, 'mm'),
+                 clip=c(0.7,3.6),
+                 xticks = c(0.7, 1.0,1.3, 1.9, 2.5, 3.5),
+                 txt_gp=fpTxtGp(label=gpar(cex=1.2),
+                                summary=gpar(cex=1.35, fontface='bold'),
+                                ticks=gpar(cex=1.2),
+                                xlab=gpar(cex = 1.4),
+                                title=gpar(cex = 1.35)),
+                 
+                 col=fpColors(box="#1c77a3ff", lines="#c5a387ff", zero = "gray50"),
+                 zero=1, cex=1,  boxsize=0.2, colgap=unit(1,"cm"),
+                 lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.2,
+                 graph.pos=4)
+print(p)
+dev.off()
+
+# forest plot for secondary outcomes
+SecondaryOutcomes <- bind_rows(result_list$death[2:5,], result_list$CPR[2:5,], 
+                     result_list$Cardiogenic_shock[2:5,], result_list$AHF[2:5,],
+                     result_list$AKI[2:5,], result_list$Infect[2:5,]) %>% 
+  as_tibble() %>% 
+  mutate(label = case_when(
+    label == "Total" ~ Outcome,
+    TRUE ~ label
+  )) %>% 
+  mutate(p_value = p.value %>% 
+           as.numeric() %>% sprintf("%.2f",.)) %>% 
+  mutate(p_value = case_when(
+    p_value %in% c("0.00", "NA") ~ p.value,
+    TRUE ~ p_value
+  )) %>% 
+  add_row(label = "Outcome", ORCI = "Odds ratio (95% CI)", `n of N` = "n of N", p_value = "P value", .before= 1) %>%
+  dplyr::select("label","n of N", "estimate", "conf.low", "conf.high", "ORCI", "p_value") %>% 
+  mutate(label = case_when(
+    label == "First tertile" ~ "   First tertile of SHR",
+    label == "Second tertile" ~ "   Second tertile of SHR",
+    label == "Third tertile" ~ "   Third tertile of SHR",
+    TRUE ~ label
+  )) %>% 
+  mutate(label = case_when(
+    label == "death" ~ "Death during hospitalization",
+    label == "CPR"  ~  "Requiring cardiopulmonary resuscitation",
+    label == "Cardiogenic_shock" ~ "Cardiogenic shock",
+    label == "AHF" ~ "New episode of AHF after admission",
+    label == "AKI" ~ "AKI at any stage",
+    label == "Infect"  ~ "Initiating any antibiotics",
+    TRUE ~ label
+  )) %>% 
+  mutate_at(vars("estimate", "conf.low", "conf.high"), as.numeric) 
+
+text <- c("label","n of N", "ORCI", "p_value" )
+
+png(file.path(pathout_tertile,"Total-OR forest secondary outcome.png"),height = 300*10, width =300*16,res= 300)
+p <- forestplot (labeltext = as.matrix(SecondaryOutcomes[,text]),#设置用于文本展示的列,在图中展示
+                 mean=SecondaryOutcomes$estimate,
+                 lower=SecondaryOutcomes$conf.low,
+                 upper=SecondaryOutcomes$conf.high,
+                 is.summary=c(T,T,F,F,F,T,F,F,F,T,F,F,F,T,F,F,F,T,F,F,F,T,F,F,F),
+                 hrzl_lines=list("1" = gpar(lwd=2, col="#1c77a3ff"),
+                                 "2" = gpar(lty=1, col="#1c77a3ff")),
+                 graphwidth = unit(7, 'cm'),
+                 xlog=TRUE,
+                 xlab= "Estimates of relative risk",
+                 lineheight = 'auto',
+                 line.margin =unit(3, 'mm'),
+                 clip=c(0.4,3.6),
+                 xticks = c(0.4, 0.7, 1.0, 1.5, 2.0, 3.0, 3.5),
+                 txt_gp=fpTxtGp(label=gpar(cex=1.2),
+                                summary=gpar(cex=1.35, fontface='bold'),
+                                ticks=gpar(cex=1.2),
+                                xlab=gpar(cex = 1.4),
+                                title=gpar(cex = 1.35)),
+                 
+                 col=fpColors(box="#1c77a3ff", lines="#c5a387ff", zero = "gray50"),
+                 zero=1, cex=1,  boxsize=0.2, colgap=unit(1,"cm"),
+                 lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.2,
+                 graph.pos=4)
+print(p)
+dev.off()
+```
