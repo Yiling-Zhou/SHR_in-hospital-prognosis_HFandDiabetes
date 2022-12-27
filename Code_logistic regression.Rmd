@@ -1299,7 +1299,7 @@ SecondaryOutcomes <- bind_rows(result_list$death[2:5,], result_list$CPR[2:5,],
 text <- c("label","n of N", "ORCI", "p_value" )
 
 png(file.path(pathout_tertile,"Total-OR forest secondary outcome.png"),height = 300*10, width =300*16,res= 300)
-p <- forestplot (labeltext = as.matrix(SecondaryOutcomes[,text]),#设置用于文本展示的列,在图中展示
+p <- forestplot (labeltext = as.matrix(SecondaryOutcomes[,text]),
                  mean=SecondaryOutcomes$estimate,
                  lower=SecondaryOutcomes$conf.low,
                  upper=SecondaryOutcomes$conf.high,
@@ -1680,7 +1680,7 @@ PrimaryOutcomes <- bind_rows(result_list$Composite[2:5,], result_list$AKI_stage2
 text <- c("label","n of N", "ORCI", "p_value" )
 
 tiff(file.path(pathout_tertile,"Total-OR forest primary outcome.tiff"),height = 300*8, width =300*16,res= 300)
-p <- forestplot (labeltext = as.matrix(PrimaryOutcomes[,text]),#设置用于文本展示的列,在图中展示
+p <- forestplot (labeltext = as.matrix(PrimaryOutcomes[,text]),
                  mean=PrimaryOutcomes$estimate,
                  lower=PrimaryOutcomes$conf.low,
                  upper=PrimaryOutcomes$conf.high,
@@ -1744,7 +1744,7 @@ SecondaryOutcomes <- bind_rows(result_list$death[2:5,], result_list$CPR[2:5,],
 text <- c("label","n of N", "ORCI", "p_value" )
 
 png(file.path(pathout_tertile,"Total-OR forest secondary outcome.png"),height = 300*10, width =300*16,res= 300)
-p <- forestplot (labeltext = as.matrix(SecondaryOutcomes[,text]),#设置用于文本展示的列,在图中展示
+p <- forestplot (labeltext = as.matrix(SecondaryOutcomes[,text]),
                  mean=SecondaryOutcomes$estimate,
                  lower=SecondaryOutcomes$conf.low,
                  upper=SecondaryOutcomes$conf.high,
@@ -2129,7 +2129,7 @@ PrimaryOutcomes <- bind_rows(result_list$Composite[2:5,], result_list$AKI_stage2
 text <- c("label","n of N", "ORCI", "p_value" )
 
 tiff(file.path(pathout_tertile,"Total-OR forest primary outcome.tiff"),height = 300*8, width =300*16,res= 300)
-p <- forestplot (labeltext = as.matrix(PrimaryOutcomes[,text]),#设置用于文本展示的列,在图中展示
+p <- forestplot (labeltext = as.matrix(PrimaryOutcomes[,text]),
                  mean=PrimaryOutcomes$estimate,
                  lower=PrimaryOutcomes$conf.low,
                  upper=PrimaryOutcomes$conf.high,
@@ -2193,7 +2193,7 @@ SecondaryOutcomes <- bind_rows(result_list$death[2:5,], result_list$CPR[2:5,],
 text <- c("label","n of N", "ORCI", "p_value" )
 
 png(file.path(pathout_tertile,"Total-OR forest secondary outcome.png"),height = 300*10, width =300*16,res= 300)
-p <- forestplot (labeltext = as.matrix(SecondaryOutcomes[,text]),#设置用于文本展示的列,在图中展示
+p <- forestplot (labeltext = as.matrix(SecondaryOutcomes[,text]),
                  mean=SecondaryOutcomes$estimate,
                  lower=SecondaryOutcomes$conf.low,
                  upper=SecondaryOutcomes$conf.high,
