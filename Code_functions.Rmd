@@ -1,0 +1,146 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+# calculation of OR and bootstrapping estimation for 95% CI for nonlinear variable in logistic regression with ipw--- 
+```{r}
+library(boot)
+library(tidyverse)
+library(WeightIt)
+library(splines)
+
+fun_glm_nonlinear <- function(data, indices, ps.formula, glm.formula, data_new, exposure){
+  #re-sampling data
+  dt_bt <- data[indices,]
+  #ipw
+  w1 <- weightit(ps.formula,
+                 data = dt_bt,
+                 method = "ebal",
+                 estimand = "ATE",
+                 stabilize = TRUE) 
+  
+  set.cobalt.options(binary = "std")
+  ##link weights with data
+  dt_bt$ipw <- w1$weights
+  #glm
+  fit_glm <- glm(glm.formula, family="binomial", data=dt_bt, weights = ipw)
+  
+  ilink <- family(fit_glm)$linkinv
+  
+  ndata <- bind_cols(dt_new, setNames(as_tibble(predict(fit_glm, dt_new, se.fit=TRUE)[1:2]),
+                                        c("fit_link", "se_link")))
+  ndata <- ndata %>% 
+    mutate(odds = exp(fit_link)) %>% 
+     mutate(reference = odds[!!sym(exposure) == 0.8] %>% 
+              first()) %>% 
+    mutate(OR = odds/reference) %>% 
+    dplyr::select(exposure, OR)
+
+  return(ndata$OR)
+}
+
+#bootstrap for OR estimate and 95% CI: percentile confidence interval
+fun_boot_glm_nonlinear <- function(data, n_rep, ps.formula, glm.formula, data_new, exposure){
+  boot.out <- boot(data = data, statistic = fun_glm_nonlinear, R = n_rep, 
+                   ps.formula = ps.formula, glm.formula = glm.formula,
+                   data_new = dt_new, exposure = exposure)
+  
+  results_dt <- dt_new %>% 
+    mutate(index_n = row_number()) %>% 
+    nest_by(SHR) %>% 
+    mutate(confin.low = list(boot.ci(boot.out, type = "perc", index = data$index_n)$percent %>% 
+             as.data.frame() %>% .$V4)) %>% 
+    mutate(confin.high = list(boot.ci(boot.out, type = "perc", index = data$index_n)$percent %>% 
+             as.data.frame() %>% .$V5)) %>% 
+    mutate(OR = list(boot.out$t0[[data$index_n]])) %>% 
+    ungroup() %>% 
+    dplyr::select(SHR, OR, confin.low, confin.high) %>% 
+    unnest(confin.low) %>% 
+    unnest(OR) %>% 
+    unnest(confin.high) %>% 
+    as_tibble() %>% 
+    add_row(SHR=0.8, OR=1, confin.low=1, confin.high=1)
+          
+  return(results_dt)
+}
+```
+#GLM of SHR tertiles function---
+```{r}
+fun_glm_tertile <- function(data, dataname, outcome){
+    # ipw 
+    covariate_formula <- "Age_current+eGFR_test_value+SBP+CCI+IHD+NT_proBNP_test_value+
+    insulin+venous_loop_diuretics+Sex_fromID+Department"
+    ps.formula <- as.formula(paste0("ratio ~ ", covariate_formula))
+    w1 <- weightit(ps.formula,
+                   data = data,
+                   method = "ebal",
+                   distribution='multinomial',
+                   estimand = "ATE",
+                   stabilize = TRUE)
+    
+    data$ipw <- w1$weights
+    
+    data <- data %>% as.data.frame()
+    formula <- as.formula(paste0(outcome, " ~ ratio"))
+    fit_glm <- glm(formula, family="binomial", data=data, weights = ipw) 
+    
+    result <- fit_glm %>% 
+      tidy_plus_plus(
+        exponentiate = TRUE,
+        add_header_rows = TRUE) %>%
+      dplyr::select(label, estimate, conf.low, conf.high, p.value) %>%
+      mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+      mutate(across(p.value, function(x){style_pvalue(x,digits=2)})) %>%
+      mutate(ORCI= paste0(estimate," (",conf.low," to ",conf.high,")"),
+             Outcome=outcome) %>% 
+      as.data.frame() 
+    result$label[1] <- dataname
+    result$conf.low[result$label=="Second tertile"] <- 1
+    result$conf.high[result$label=="Second tertile"] <- 1
+    result <- result[c(1,3,2,4),]
+    
+    number <- table(data$ratio, data[,outcome]) %>% 
+      data.frame() %>% 
+      pivot_wider(., names_from = Var2, values_from=Freq) %>% 
+      dplyr::rename(noevent="0", event="1", label=Var1) %>% 
+      mutate(N=noevent+event) %>% 
+      mutate("n of N" = paste(event, N, sep="/")) %>% 
+      dplyr::select(label, "n of N") %>% 
+      as.data.frame()
+    
+    result <- left_join(x=result, y= number)
+    
+    return(result)
+  }
+```
+#GLM of tertile and interaction function
+```{r}
+fun_glm_tertile_interaction <- function(term, outcome){
+  formula <- as.formula(paste0(outcome, " ~ ratio*",term))
+  fit_glm <- glm(formula, family="binomial", data=data, weights = ipw) 
+  result <- fit_glm %>% 
+    tidy_plus_plus(
+      exponentiate = TRUE,
+      add_header_rows = TRUE
+    ) %>%
+    dplyr::select(label,estimate, conf.low, conf.high, p.value) %>%
+    mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+    mutate(across(p.value, function(x){style_pvalue(x,digits=3)})) %>%
+    as.data.frame() %>% 
+    subset(str_detect(label,"\\*")) %>% 
+    as_tibble() %>% 
+    add_row(label=outcome,.before=1) %>% 
+    as.data.frame()
+  return(result)
+}
+```
+
+```{r}
+
+```
+
+
+
